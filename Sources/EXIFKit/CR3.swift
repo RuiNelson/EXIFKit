@@ -114,160 +114,53 @@ public struct CR3Container {
 
     /// Write modified EXIF metadata back to a CR3 file.
     ///
-    /// Strategy: rebuild the ISOBMFF box tree with updated CMT contents.
-    /// When CMT sizes change, all parent box sizes (uuid, moov) are recalculated,
-    /// and everything after moov is shifted accordingly.
+    /// Strategy: overwrite each CMT box's payload in place, zero-padded to its original size.
+    /// moov precedes mdat, and the sample tables (co64) and Canon's CTBO hold absolute offsets
+    /// past it, so moov must not change size. Metadata that no longer fits throws instead.
     public static func writeEXIF(_ structure: TIFFStructure, to data: Data) throws -> Data {
         let boxes = try ISOBMFFParser.parse(data)
-
-        // Build new CMT TIFF payloads
-        let cmt1TIFF = TIFFSerializer.serialize(TIFFStructure(
-            byteOrder: structure.byteOrder,
-            ifd0: structure.ifd0
-        ))
-
-        var cmt2TIFF: Data? = nil
-        if let exifIFD = structure.exifIFD {
-            cmt2TIFF = TIFFSerializer.serialize(TIFFStructure(
-                byteOrder: structure.byteOrder,
-                ifd0: exifIFD
-            ))
+        guard let moov = boxes.first(where: { $0.type == "moov" }) else {
+            throw EXIFError.invalidCR3("No moov box found")
         }
+        let canonBox = findCanonUUIDBox(in: moov)
 
-        var cmt4TIFF: Data? = nil
-        if let gpsIFD = structure.gpsIFD {
-            cmt4TIFF = TIFFSerializer.serialize(TIFFStructure(
-                byteOrder: structure.byteOrder,
-                ifd0: gpsIFD
-            ))
-        }
+        let payloads: [(type: String, ifd: IFD?)] = [
+            ("CMT1", structure.ifd0),
+            ("CMT2", structure.exifIFD),
+            ("CMT4", structure.gpsIFD),
+        ]
 
-        // Rebuild the file box by box
-        var output = Data()
-
-        for box in boxes {
-            if box.type == "moov" {
-                let rebuiltMoov = rebuildMoovBox(
-                    moov: box,
-                    originalData: data,
-                    cmt1: cmt1TIFF,
-                    cmt2: cmt2TIFF,
-                    cmt4: cmt4TIFF
-                )
-                output.append(rebuiltMoov)
-            } else {
-                // Copy other boxes verbatim from original data
-                let start = data.startIndex + box.fileOffset
-                let end = start + box.totalSize
-                if end <= data.endIndex {
-                    output.append(data[start..<end])
+        var output = data
+        for (type, ifd) in payloads {
+            guard let box = canonBox?.child(ofType: type) ?? findBoxRecursive(type, in: [moov]) else {
+                if ifd != nil {
+                    throw EXIFError.invalidCR3("No \(type) box to hold the metadata; adding boxes is not supported")
                 }
+                continue
             }
+            // A removed IFD becomes an empty TIFF: decoders (LibRaw) reject a CR3 with a zero-filled CMT box
+            let tiff = TIFFSerializer.serialize(TIFFStructure(byteOrder: structure.byteOrder, ifd0: ifd ?? IFD()))
+            let capacity = box.totalSize - 8
+            guard tiff.count <= capacity else {
+                throw EXIFError.invalidCR3("\(type) metadata grew to \(tiff.count) bytes; it must fit in the original \(capacity)")
+            }
+            let start = output.startIndex + box.fileOffset + 8
+            output.replaceSubrange(start..<start + capacity, with: tiff + Data(count: capacity - tiff.count))
         }
 
         return output
     }
 
-    /// Rebuild the moov box, replacing CMT children with new TIFF data
-    private static func rebuildMoovBox(
-        moov: ISOBMFFBox,
-        originalData: Data,
-        cmt1: Data,
-        cmt2: Data?,
-        cmt4: Data?
-    ) -> Data {
-        var moovPayload = Data()
-
-        for child in moov.children {
-            if child.type == "uuid" && findBoxRecursive("CMT1", in: [child]) != nil {
-                // This is Canon's UUID box — rebuild with new CMT data
-                let rebuiltUUID = rebuildCanonUUIDBox(
-                    uuidBox: child,
-                    originalData: originalData,
-                    cmt1: cmt1,
-                    cmt2: cmt2,
-                    cmt4: cmt4
-                )
-                moovPayload.append(rebuiltUUID)
-            } else {
-                // Copy other children verbatim
-                let start = originalData.startIndex + child.fileOffset
-                let end = start + child.totalSize
-                if end <= originalData.endIndex {
-                    moovPayload.append(originalData[start..<end])
-                }
-            }
-        }
-
-        return buildBox(type: "moov", payload: moovPayload)
-    }
-
-    /// Rebuild Canon's UUID box with updated CMT children
-    private static func rebuildCanonUUIDBox(
-        uuidBox: ISOBMFFBox,
-        originalData: Data,
-        cmt1: Data,
-        cmt2: Data?,
-        cmt4: Data?
-    ) -> Data {
-        var uuidPayload = Data()
-
-        // UUID boxes start with 16 bytes of UUID identifier
-        if uuidBox.data.count >= 16 {
-            uuidPayload.append(uuidBox.data.prefix(16))
-        } else {
-            uuidPayload.append(canonUUID)
-        }
-
-        for child in uuidBox.children {
-            switch child.type {
-            case "CMT1":
-                uuidPayload.append(buildBox(type: "CMT1", payload: cmt1))
-            case "CMT2":
-                if let cmt2 = cmt2 {
-                    uuidPayload.append(buildBox(type: "CMT2", payload: cmt2))
-                }
-            case "CMT4":
-                if let cmt4 = cmt4 {
-                    uuidPayload.append(buildBox(type: "CMT4", payload: cmt4))
-                }
-            default:
-                // Copy other children (CNCV, CCTP, CMT3/MakerNote, THMB, etc.)
-                let start = originalData.startIndex + child.fileOffset
-                let end = start + child.totalSize
-                if end <= originalData.endIndex {
-                    uuidPayload.append(originalData[start..<end])
-                }
-            }
-        }
-
-        // Build the uuid box (type bytes are inside the payload for uuid boxes)
-        return buildBox(type: "uuid", payload: uuidPayload)
-    }
-
-    /// Build a single ISOBMFF box from type + payload
-    private static func buildBox(type: String, payload: Data) -> Data {
-        var box = Data()
-        let totalSize = UInt32(payload.count + 8)
-        var size = totalSize.bigEndian
-        box.append(Data(bytes: &size, count: 4))
-        let typeBytes = Array(type.utf8.prefix(4))
-        box.append(contentsOf: typeBytes)
-        // Pad type to 4 bytes if shorter (shouldn't happen with valid types)
-        for _ in 0..<(4 - typeBytes.count) { box.append(0x20) } // space padding
-        box.append(payload)
-        return box
-    }
-
     // MARK: - Stripping
 
-    /// Strip EXIF from a CR3 file by zeroing out CMT box contents.
+    /// Strip EXIF from a CR3 file by replacing each CMT box's contents with an empty TIFF.
+    /// Zero-filling instead makes decoders (LibRaw) reject the whole file.
     public static func stripEXIF(from data: Data) throws -> Data {
         let boxes = try ISOBMFFParser.parse(data)
 
         var mutableData = data
 
-        // Find all CMT boxes and zero their payloads
+        // Replace each CMT box's payload with an empty TIFF (keeping its byte order), zero-padded in place
         for cmtType in ["CMT1", "CMT2", "CMT3", "CMT4"] {
             if let cmtBox = findBoxRecursive(cmtType, in: boxes) {
                 let payloadStart = cmtBox.fileOffset + 8
@@ -275,8 +168,10 @@ public struct CR3Container {
                 let start = mutableData.startIndex + payloadStart
                 let end = start + payloadLength
                 if end <= mutableData.endIndex {
-                    let zeros = Data(count: payloadLength)
-                    mutableData.replaceSubrange(start..<end, with: zeros)
+                    let byteOrder: ByteOrder = cmtBox.data.first == 0x4D ? .bigEndian : .littleEndian
+                    var empty = TIFFSerializer.serialize(TIFFStructure(byteOrder: byteOrder))
+                    if empty.count > payloadLength { empty = Data() } // too small to hold a TIFF: zero it
+                    mutableData.replaceSubrange(start..<end, with: empty + Data(count: payloadLength - empty.count))
                 }
             }
         }

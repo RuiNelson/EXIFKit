@@ -32,7 +32,7 @@ public struct ByteReader {
     // MARK: - Bounds checking
 
     private func ensureAvailable(_ count: Int) throws {
-        guard offset + count <= data.count else {
+        guard count >= 0, offset + count <= data.count else {
             throw EXIFError.unexpectedEndOfData(
                 needed: count,
                 available: bytesRemaining,
@@ -103,8 +103,9 @@ public struct ByteReader {
     public mutating func readASCII(_ maxLength: Int) throws -> String {
         let bytes = try readBytes(maxLength)
         // Strip null terminators
-        let trimmed = bytes.prefix(while: { $0 != 0 })
-        return String(data: Data(trimmed), encoding: .ascii) ?? ""
+        let trimmed = Data(bytes.prefix(while: { $0 != 0 }))
+        // Many writers put UTF-8 (or Latin-1) in ASCII tags; decoding as strict ASCII would drop them.
+        return String(data: trimmed, encoding: .utf8) ?? String(data: trimmed, encoding: .isoLatin1) ?? ""
     }
 
     // MARK: - Navigation
@@ -187,12 +188,10 @@ public struct ByteWriter {
 
     /// Write ASCII string with null terminator, padded to even length
     public mutating func writeASCII(_ string: String) {
-        if let asciiData = string.data(using: .ascii) {
-            data.append(asciiData)
-        }
+        data.append(contentsOf: string.utf8)
         data.append(0) // null terminator
         // TIFF requires values at even offsets
-        if (string.count + 1) % 2 != 0 {
+        if (string.utf8.count + 1) % 2 != 0 {
             data.append(0)
         }
     }

@@ -109,7 +109,7 @@ public struct HEIFContainer {
     ///
     /// Current strategy: in-place replacement when the new EXIF data
     /// fits in the same space, with zero-padding for smaller data.
-    /// For larger data, we append to the end and update iloc.
+    /// For larger data, we append it in a new mdat box and repoint iloc.
     public static func writeEXIF(_ structure: TIFFStructure, to data: Data) throws -> Data {
         let boxes = try ISOBMFFParser.parse(data)
 
@@ -124,15 +124,14 @@ public struct HEIFContainer {
 
         // Build the complete EXIF item: 4-byte prefix + "Exif\0\0" + TIFF
         var newExifItem = Data()
-        // The 4-byte prefix is the offset from the start of the item to the TIFF header
-        // Typically 6 (length of "Exif\0\0")
-        var exifPrefix: UInt32 = 6
-        newExifItem.append(Data(bytes: &exifPrefix, count: 4))
+        // The 4-byte prefix is a big-endian offset from the end of this field to the TIFF header:
+        // 6 skips "Exif\0\0"
+        newExifItem.append(contentsOf: [0x00, 0x00, 0x00, 0x06])
         newExifItem.append(contentsOf: [0x45, 0x78, 0x69, 0x66, 0x00, 0x00]) // "Exif\0\0"
         newExifItem.append(newTIFF)
 
         // Find the EXIF item's location in the file
-        guard let exifLocation = findExifItemLocation(meta: meta, iloc: iloc) else {
+        guard let exifLocation = try findExifItemLocation(meta: meta, iloc: iloc, fileSize: data.count) else {
             throw EXIFError.unsupportedFormat("HEIF: Cannot locate EXIF item for writing")
         }
 
@@ -146,19 +145,19 @@ public struct HEIFContainer {
             padded.append(Data(count: exifLocation.length - newExifItem.count))
             mutableData.replaceSubrange(start..<end, with: padded)
         } else {
-            // Append strategy: add new EXIF at end of file, update iloc
-            // This is a simplified approach — a full implementation would
-            // rebuild the iloc box with updated offsets
+            // Append strategy: wrap the new item in its own top-level mdat (keeping the
+            // file a valid box sequence) and repoint the item's iloc extent at it
+            var mdatHeader = ByteWriter(byteOrder: .bigEndian)
+            mdatHeader.writeUInt32(UInt32(newExifItem.count + 8))
+            mdatHeader.writeBytes(Data("mdat".utf8))
+            mutableData.append(mdatHeader.data)
             let appendOffset = mutableData.count
             mutableData.append(newExifItem)
 
-            // Try to patch iloc in place (update the offset for the EXIF item)
-            // This requires finding the exact iloc entry bytes and rewriting them
-            patchIlocOffset(
+            try patchIlocExtent(
                 in: &mutableData,
-                meta: meta,
                 iloc: iloc,
-                itemID: exifLocation.itemID,
+                location: exifLocation,
                 newOffset: UInt64(appendOffset),
                 newLength: UInt64(newExifItem.count)
             )
@@ -176,7 +175,7 @@ public struct HEIFContainer {
             throw EXIFError.unsupportedFormat("HEIF: Cannot strip — no meta/iloc box found")
         }
 
-        guard let exifLocation = findExifItemLocation(meta: meta, iloc: iloc) else {
+        guard let exifLocation = try findExifItemLocation(meta: meta, iloc: iloc, fileSize: data.count) else {
             // No EXIF to strip
             return data
         }
@@ -193,113 +192,40 @@ public struct HEIFContainer {
     // MARK: - Helpers
 
     private struct ExifItemLocation {
-        let itemID: UInt32
+        let item: ItemLocations.Item
+        let extent: ItemLocations.Extent
+        let fieldSizes: (offset: Int, length: Int)
         let offset: Int
         let length: Int
     }
 
-    /// Find the EXIF item's byte offset and length in the file
+    /// Find the EXIF item's first extent: its byte range in the file and the iloc fields describing it
     private static func findExifItemLocation(
         meta: ISOBMFFBox,
-        iloc: ISOBMFFBox
-    ) -> ExifItemLocation? {
-        // Find EXIF item ID from iinf
-        let exifItemID = findExifItemID(in: meta)
+        iloc: ISOBMFFBox,
+        fileSize: Int
+    ) throws -> ExifItemLocation? {
+        let exifItemID = ISOBMFFParser.findExifItemID(in: meta)
         guard exifItemID != 0 else { return nil }
 
-        // Parse iloc to find offset/length
-        // payloadData already strips the 4-byte version+flags for FullBoxes,
-        // so byte 0 is the offset_size/length_size field, not the version.
-        let ilocData = iloc.payloadData
-        guard ilocData.count >= 4 else { return nil }
+        let locations = try ItemLocations(iloc)
+        guard let item = locations.items.first(where: { $0.itemID == exifItemID }),
+              let extent = item.extents.first else { return nil }
 
-        let ilocVersion = iloc.version ?? 0
-        let offsetSize = Int((ilocData[ilocData.startIndex] >> 4) & 0x0F)
-        let lengthSize = Int(ilocData[ilocData.startIndex] & 0x0F)
-        let baseOffsetSize = Int((ilocData[ilocData.startIndex + 1] >> 4) & 0x0F)
-
-        var reader = ByteReader(data: Data(ilocData), byteOrder: .bigEndian)
-        reader.offset = 2 // skip the two size-fields bytes
-
-        let itemCount: Int
-        if ilocVersion < 2 {
-            itemCount = Int((try? reader.readUInt16()) ?? 0)
-        } else {
-            itemCount = Int((try? reader.readUInt32()) ?? 0)
+        guard item.constructionMethod == 0 else {
+            throw EXIFError.invalidHEIF("EXIF item stored with construction method \(item.constructionMethod) is not supported")
+        }
+        guard let range = item.fileRange(of: extent, fileSize: fileSize) else {
+            throw EXIFError.invalidHEIF("EXIF item extends past end of file")
         }
 
-        for _ in 0..<itemCount {
-            let itemID: UInt32
-            if ilocVersion < 2 {
-                itemID = UInt32((try? reader.readUInt16()) ?? 0)
-            } else {
-                itemID = (try? reader.readUInt32()) ?? 0
-            }
-
-            if ilocVersion >= 1 { _ = try? reader.readUInt16() }
-            _ = try? reader.readUInt16() // data_reference_index
-
-            let baseOffset: Int
-            switch baseOffsetSize {
-            case 4: baseOffset = Int((try? reader.readUInt32()) ?? 0)
-            case 8:
-                let hi = UInt64((try? reader.readUInt32()) ?? 0)
-                let lo = UInt64((try? reader.readUInt32()) ?? 0)
-                baseOffset = Int((hi << 32) | lo)
-            default: baseOffset = 0
-            }
-
-            let extentCount = Int((try? reader.readUInt16()) ?? 0)
-
-            for _ in 0..<extentCount {
-                let extOffset: Int
-                switch offsetSize {
-                case 4: extOffset = Int((try? reader.readUInt32()) ?? 0)
-                case 8:
-                    let hi = UInt64((try? reader.readUInt32()) ?? 0)
-                    let lo = UInt64((try? reader.readUInt32()) ?? 0)
-                    extOffset = Int((hi << 32) | lo)
-                default: extOffset = 0
-                }
-
-                let extLength: Int
-                switch lengthSize {
-                case 4: extLength = Int((try? reader.readUInt32()) ?? 0)
-                case 8:
-                    let hi = UInt64((try? reader.readUInt32()) ?? 0)
-                    let lo = UInt64((try? reader.readUInt32()) ?? 0)
-                    extLength = Int((hi << 32) | lo)
-                default: extLength = 0
-                }
-
-                if itemID == exifItemID {
-                    return ExifItemLocation(
-                        itemID: itemID,
-                        offset: baseOffset + extOffset,
-                        length: extLength
-                    )
-                }
-            }
-        }
-
-        return nil
-    }
-
-    /// Find the EXIF item ID from iinf
-    private static func findExifItemID(in meta: ISOBMFFBox) -> UInt32 {
-        guard let iinf = meta.child(ofType: "iinf") else { return 0 }
-        for infe in iinf.children(ofType: "infe") {
-            let pd = infe.payloadData
-            guard pd.count >= 8 else { continue }
-            var reader = ByteReader(data: Data(pd), byteOrder: .bigEndian)
-            let itemID = (try? reader.readUInt16()) ?? 0
-            _ = try? reader.readUInt16()
-            let typeBytes = (try? reader.readBytes(4)) ?? Data()
-            if String(data: typeBytes, encoding: .ascii) == "Exif" {
-                return UInt32(itemID)
-            }
-        }
-        return 0
+        return ExifItemLocation(
+            item: item,
+            extent: extent,
+            fieldSizes: (locations.offsetSize, locations.lengthSize),
+            offset: range.lowerBound,
+            length: range.count
+        )
     }
 
     /// Scan mdat for a TIFF header (fallback when iloc parsing fails)
@@ -355,120 +281,35 @@ public struct HEIFContainer {
         return nil
     }
 
-    /// Patch iloc offset and length for a specific item in-place.
-    ///
-    /// This scans the iloc box bytes in the file to find the entry matching
-    /// the target item ID, then overwrites the offset and length fields directly.
-    private static func patchIlocOffset(
+    /// Repoint the EXIF item's first iloc extent at new data by rewriting its fields in place.
+    private static func patchIlocExtent(
         in data: inout Data,
-        meta: ISOBMFFBox,
         iloc: ISOBMFFBox,
-        itemID: UInt32,
+        location: ExifItemLocation,
         newOffset: UInt64,
         newLength: UInt64
-    ) {
-        let ilocData = iloc.payloadData
-        guard ilocData.count >= 4 else { return }
+    ) throws {
+        // Field positions are relative to payloadData: after the 8-byte box header and 4-byte version/flags
+        let payloadStart = data.startIndex + iloc.fileOffset + 12
 
-        let ilocVersion = iloc.version ?? 0
-        let offsetSize = Int((ilocData[ilocData.startIndex] >> 4) & 0x0F)
-        let lengthSize = Int(ilocData[ilocData.startIndex] & 0x0F)
-        let baseOffsetSize = Int((ilocData[ilocData.startIndex + 1] >> 4) & 0x0F)
-
-        // We need the iloc box's position in the file to patch bytes
-        // iloc is a child of meta, which is a FullBox.
-        // The iloc payload starts after: meta box header + meta version/flags(4) +
-        // ... child boxes before iloc. We use iloc.fileOffset directly.
-        let ilocPayloadFileOffset: Int
-        if iloc.isFullBox {
-            ilocPayloadFileOffset = iloc.fileOffset + 8 + 4 // box header + version/flags
-        } else {
-            ilocPayloadFileOffset = iloc.fileOffset + 8
+        func write(_ value: UInt64, size: Int, at position: Int) throws {
+            var writer = ByteWriter(byteOrder: .bigEndian)
+            switch size {
+            case 4 where value <= UInt32.max:
+                writer.writeUInt32(UInt32(value))
+            case 8:
+                writer.writeUInt32(UInt32(value >> 32))
+                writer.writeUInt32(UInt32(truncatingIfNeeded: value))
+            default:
+                throw EXIFError.writeFailed("HEIF: iloc field too small for the new EXIF location")
+            }
+            let start = payloadStart + position
+            data.replaceSubrange(start..<start + size, with: writer.data)
         }
 
-        // Parse iloc structure to find the byte positions of our target item's fields
-        // payloadData byte layout: [offset/length sizes (1)] [base_offset/index sizes (1)] [item_count (2 or 4)] [items...]
-        var reader = ByteReader(data: Data(ilocData), byteOrder: .bigEndian)
-        reader.offset = 2 // skip the two size-fields bytes
-
-        let itemCount: Int
-        if ilocVersion < 2 {
-            itemCount = Int((try? reader.readUInt16()) ?? 0)
-        } else {
-            itemCount = Int((try? reader.readUInt32()) ?? 0)
-        }
-
-        for _ in 0..<itemCount {
-            let thisItemID: UInt32
-            if ilocVersion < 2 {
-                thisItemID = UInt32((try? reader.readUInt16()) ?? 0)
-            } else {
-                thisItemID = (try? reader.readUInt32()) ?? 0
-            }
-
-            if ilocVersion >= 1 {
-                _ = try? reader.readUInt16() // construction_method
-            }
-            _ = try? reader.readUInt16() // data_reference_index
-
-            // Skip base_offset
-            reader.offset += baseOffsetSize
-
-            let extentCount = Int((try? reader.readUInt16()) ?? 0)
-
-            for extIdx in 0..<extentCount {
-                let extentOffsetPos = reader.offset
-
-                // Skip extent offset
-                reader.offset += offsetSize
-
-                let extentLengthPos = reader.offset
-
-                // Skip extent length
-                reader.offset += lengthSize
-
-                if thisItemID == itemID && extIdx == 0 {
-                    // Patch the extent offset and length in the file data
-                    let fileExtentOffsetPos = ilocPayloadFileOffset + extentOffsetPos
-
-                    // Write new offset
-                    if offsetSize == 4 && fileExtentOffsetPos + 4 <= data.count {
-                        let val = UInt32(newOffset).bigEndian
-                        withUnsafeBytes(of: val) { buf in
-                            for i in 0..<4 {
-                                data[data.startIndex + fileExtentOffsetPos + i] = buf[i]
-                            }
-                        }
-                    } else if offsetSize == 8 && fileExtentOffsetPos + 8 <= data.count {
-                        let val = newOffset.bigEndian
-                        withUnsafeBytes(of: val) { buf in
-                            for i in 0..<8 {
-                                data[data.startIndex + fileExtentOffsetPos + i] = buf[i]
-                            }
-                        }
-                    }
-
-                    // Write new length
-                    let fileLengthPos = ilocPayloadFileOffset + extentLengthPos
-                    if lengthSize == 4 && fileLengthPos + 4 <= data.count {
-                        let val = UInt32(newLength).bigEndian
-                        withUnsafeBytes(of: val) { buf in
-                            for i in 0..<4 {
-                                data[data.startIndex + fileLengthPos + i] = buf[i]
-                            }
-                        }
-                    } else if lengthSize == 8 && fileLengthPos + 8 <= data.count {
-                        let val = newLength.bigEndian
-                        withUnsafeBytes(of: val) { buf in
-                            for i in 0..<8 {
-                                data[data.startIndex + fileLengthPos + i] = buf[i]
-                            }
-                        }
-                    }
-
-                    return
-                }
-            }
-        }
+        // Extent offsets are relative to the item's base_offset
+        try write(newOffset - location.item.baseOffset, size: location.fieldSizes.offset,
+                  at: location.extent.offsetFieldPosition)
+        try write(newLength, size: location.fieldSizes.length, at: location.extent.lengthFieldPosition)
     }
 }

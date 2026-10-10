@@ -767,4 +767,310 @@ final class EXIFKitTests: XCTestCase {
             XCTFail("MakerNote should be preserved as undefined")
         }
     }
+
+    // MARK: - Regression: shared parsing
+
+    func testReadBytesRejectsNegativeCount() {
+        var reader = ByteReader(data: Data([0x01, 0x02]), byteOrder: .bigEndian)
+        XCTAssertThrowsError(try reader.readBytes(-1))
+    }
+
+    func testNonASCIIStringsRoundTrip() throws {
+        var structure = TIFFStructure(byteOrder: .littleEndian)
+        structure.ifd0.set(tagID: Tag.artist, value: .ascii("José Müller"))
+        structure.ifd0.set(tagID: Tag.copyright, value: .ascii("© 2024"))
+
+        let parsed = try TIFFParser.parse(TIFFSerializer.serialize(structure))
+        XCTAssertEqual(parsed.artist, "José Müller")
+        XCTAssertEqual(parsed.copyright, "© 2024")
+    }
+
+    func testIFDTypedSubIFDPointerResolves() throws {
+        var structure = TIFFStructure(byteOrder: .bigEndian)
+        structure.exifIFD = IFD()
+        structure.exifIFD!.set(tagID: Tag.isoSpeedRatings, value: .short(640))
+        var tiff = TIFFSerializer.serialize(structure)
+
+        // IFD0 (at 8) holds only the EXIF pointer; retype it from LONG (4) to IFD (13)
+        XCTAssertEqual(tiff[12...13], Data([0x00, 0x04]))
+        tiff[13] = 13
+        XCTAssertEqual(try TIFFParser.parse(tiff).iso, 640)
+    }
+
+    // MARK: - Regression: JPEG
+
+    /// Camera-style EXIF block: IFD0 → ExifIFD → InteropIFD, and IFD1 whose JPEG thumbnail sits after all IFDs.
+    private func buildCameraTIFF(thumbnail: Data) -> Data {
+        let byteOrder = ByteOrder.littleEndian
+        func size(_ ifd: IFD) -> Int { IFDWriter.writeIFD(ifd, baseOffset: 0, byteOrder: byteOrder).count }
+
+        var ifd0 = IFD()
+        ifd0.set(tagID: Tag.make, value: .ascii("Canon"))
+        ifd0.set(tagID: Tag.exifIFDPointer, value: .long(0))
+        var ifd1 = IFD()
+        ifd1.set(tagID: 0x0201, value: .long(0)) // JPEGInterchangeFormat
+        ifd1.set(tagID: 0x0202, value: .long(UInt32(thumbnail.count)))
+        var exif = IFD()
+        exif.set(tagID: Tag.isoSpeedRatings, value: .short(100))
+        exif.set(tagID: 0xA005, value: .long(0)) // InteropIFDPointer
+        var interop = IFD()
+        interop.set(tagID: 0x0001, value: .ascii("R98"))
+
+        let ifd1Offset = 8 + size(ifd0)
+        let exifOffset = ifd1Offset + size(ifd1)
+        let interopOffset = exifOffset + size(exif)
+        ifd0.set(tagID: Tag.exifIFDPointer, value: .long(UInt32(exifOffset)))
+        ifd0.nextIFDOffset = UInt32(ifd1Offset)
+        ifd1.set(tagID: 0x0201, value: .long(UInt32(interopOffset + size(interop))))
+        exif.set(tagID: 0xA005, value: .long(UInt32(interopOffset)))
+
+        var writer = ByteWriter(byteOrder: byteOrder)
+        writer.writeBytes([0x49, 0x49])
+        writer.writeUInt16(42)
+        writer.writeUInt32(8)
+        for (ifd, offset) in [(ifd0, 8), (ifd1, ifd1Offset), (exif, exifOffset), (interop, interopOffset)] {
+            writer.writeBytes(IFDWriter.writeIFD(ifd, baseOffset: UInt32(offset), byteOrder: byteOrder))
+        }
+        writer.writeBytes(thumbnail)
+        return writer.data
+    }
+
+    /// buildMinimalJPEG with an EXIF APP1 holding `tiff` right after SOI
+    private func buildJPEG(exif tiff: Data) -> Data {
+        let payload = Data("Exif".utf8) + [0, 0] + tiff
+        let length = payload.count + 2
+        return Data([0xFF, 0xD8, 0xFF, 0xE1, UInt8(length >> 8), UInt8(length & 0xFF)])
+            + payload + buildMinimalJPEG().dropFirst(2)
+    }
+
+    func testJPEGRewriteKeepsThumbnailAndInteropIFD() throws {
+        let thumbnail = Data([0xFF, 0xD8]) + Data(repeating: 0x5A, count: 300) + Data([0xFF, 0xD9])
+        let jpeg = buildJPEG(exif: buildCameraTIFF(thumbnail: thumbnail))
+        var structure = try EXIFKit.read(from: jpeg)
+        XCTAssertEqual(structure.thumbnailData, thumbnail)
+
+        structure.ifd0.set(tagID: Tag.software, value: .ascii("EXIFKit"))
+        let rewritten = try EXIFKit.read(from: EXIFKit.write(structure, to: jpeg))
+
+        XCTAssertEqual(rewritten.software, "EXIFKit")
+        XCTAssertEqual(rewritten.thumbnailData, thumbnail)
+        let interopPointer = try XCTUnwrap(rewritten.exifIFD?.value(for: 0xA005)?.uint32Value)
+        let interop = try IFDReader.readIFD(
+            from: XCTUnwrap(rewritten.sourceTIFFData), at: Int(interopPointer), byteOrder: .littleEndian
+        )
+        XCTAssertEqual(interop.value(for: 0x0001)?.stringValue, "R98")
+    }
+
+    func testJPEGWriteRejectsOversizedEXIF() {
+        var structure = TIFFStructure(byteOrder: .littleEndian)
+        structure.exifIFD = IFD()
+        structure.exifIFD!.set(tagID: Tag.makerNote, value: .undefined(Data(count: 70_000)))
+        XCTAssertThrowsError(try EXIFKit.write(structure, to: buildMinimalJPEG()))
+    }
+
+    func testJPEGInsertsEXIFAfterJFIFAndSkipsFillBytes() throws {
+        var jpeg = buildMinimalJPEG()
+        jpeg.insert(0xFF, at: 2) // fill byte before APP0
+
+        var structure = TIFFStructure(byteOrder: .littleEndian)
+        structure.ifd0.set(tagID: Tag.make, value: .ascii("Camera"))
+        let written = try EXIFKit.write(structure, to: jpeg)
+
+        XCTAssertEqual([UInt8](written.prefix(4)), [0xFF, 0xD8, 0xFF, 0xE0]) // JFIF APP0 stays first
+        XCTAssertEqual(try EXIFKit.read(from: written).make, "Camera")
+    }
+
+    func testJPEGWriteWithoutImageDataThrows() {
+        // SOI + APP0 only, e.g. a truncated download: there is no SOS to carry over
+        let headerOnly = buildMinimalJPEG().prefix(20)
+        XCTAssertThrowsError(try EXIFKit.write(TIFFStructure(byteOrder: .littleEndian), to: headerOnly))
+    }
+
+    // MARK: - Regression: TIFF
+
+    func testTIFFWriteKeepsIFDsWordAligned() throws {
+        var structure = TIFFStructure(byteOrder: .littleEndian)
+        structure.ifd0.set(tagID: Tag.make, value: .ascii("Nikon"))
+        let tiff = TIFFSerializer.serialize(structure) + [0x00] // odd length, like trailing image data
+
+        var modified = try EXIFKit.read(from: tiff, format: .tiff)
+        modified.setGPSCoordinates(latitude: 1, longitude: 2)
+        let written = try EXIFKit.write(modified, to: tiff, format: .tiff)
+
+        var reader = ByteReader(data: written, byteOrder: .littleEndian)
+        try reader.seek(to: 4)
+        XCTAssertEqual(try reader.readUInt32() % 2, 0)
+        let gpsPointer = try XCTUnwrap(EXIFKit.read(from: written, format: .tiff).ifd0.value(for: Tag.gpsIFDPointer))
+        XCTAssertEqual(try XCTUnwrap(gpsPointer.uint32Value) % 2, 0)
+    }
+
+    func testTIFFRewriteReusesOriginalBytes() throws {
+        var structure = TIFFStructure(byteOrder: .littleEndian)
+        structure.ifd0.set(tagID: Tag.make, value: .ascii("Canon"))
+        structure.exifIFD = IFD()
+        structure.exifIFD!.set(tagID: Tag.isoSpeedRatings, value: .short(100))
+        structure.exifIFD!.set(tagID: Tag.makerNote, value: .undefined(Data(repeating: 0xAB, count: 4096)))
+        let tiff = TIFFSerializer.serialize(structure)
+
+        // An unchanged write is byte-identical
+        XCTAssertEqual(try EXIFKit.write(EXIFKit.read(from: tiff), to: tiff), tiff)
+
+        // An edit appends only what changed; the 4 KB MakerNote stays where it was
+        var edited = try EXIFKit.read(from: tiff)
+        edited.exifIFD!.set(tagID: Tag.isoSpeedRatings, value: .short(200))
+        edited.ifd0.set(tagID: Tag.artist, value: .ascii("Someone"))
+        let once = try EXIFKit.write(edited, to: tiff)
+        XCTAssertLessThan(once.count - tiff.count, 256)
+        XCTAssertEqual(try EXIFKit.read(from: once).iso, 200)
+        XCTAssertEqual(once.range(of: Data(repeating: 0xAB, count: 4096)), tiff.range(of: Data(repeating: 0xAB, count: 4096)))
+
+        // Saving the same metadata again doesn't grow the file
+        XCTAssertEqual(try EXIFKit.write(edited, to: once).count, once.count)
+    }
+
+    func testTIFFStripErasesOldGPSBytes() throws {
+        var structure = TIFFStructure(byteOrder: .littleEndian)
+        structure.ifd0.set(tagID: Tag.make, value: .ascii("Nikon"))
+        structure.setGPSCoordinates(latitude: 35.6762, longitude: 139.6503)
+        structure.gpsIFD!.set(tagID: Tag.gpsMapDatum, value: .ascii("SECRET-DATUM"))
+        let tiff = TIFFSerializer.serialize(structure)
+        XCTAssertNotNil(tiff.range(of: Data("SECRET-DATUM".utf8)))
+
+        let stripped = try EXIFKit.strip(from: tiff)
+        let parsed = try EXIFKit.read(from: stripped)
+        XCTAssertNil(parsed.gpsIFD)
+        XCTAssertEqual(parsed.make, "Nikon")
+        XCTAssertNil(stripped.range(of: Data("SECRET-DATUM".utf8)))
+    }
+
+    // MARK: - Regression: ISOBMFF (HEIF / CR3)
+
+    private func box(_ type: String, _ payload: Data) -> Data {
+        var writer = ByteWriter(byteOrder: .bigEndian)
+        writer.writeUInt32(UInt32(payload.count + 8))
+        writer.writeBytes(Data(type.utf8))
+        writer.writeBytes(payload)
+        return writer.data
+    }
+
+    /// Exif item per ISO 23008-12: big-endian offset to the TIFF header, "Exif\0\0", TIFF
+    private func exifItem(_ tiff: Data) -> Data {
+        Data([0, 0, 0, 6]) + Data("Exif".utf8) + [0, 0] + tiff
+    }
+
+    /// Minimal HEIF: ftyp + meta{iinf{infe "Exif"}, iloc} + mdat holding the Exif item.
+    /// iloc uses 8-byte extent offsets so tests can point them anywhere.
+    private func buildMinimalHEIF(item: Data, baseOffset: UInt32 = 0, iinfVersion: UInt8 = 0,
+                                  extentOffset: UInt64? = nil) -> Data {
+        let ftyp = box("ftyp", Data("heic".utf8) + Data(count: 4) + Data("mif1heic".utf8))
+        let infe = box("infe", Data([2, 0, 0, 0, 0, 1, 0, 0]) + Data("Exif".utf8) + [0])
+        let entryCount = iinfVersion == 0 ? Data([0, 1]) : Data([0, 0, 0, 1])
+        let iinf = box("iinf", Data([iinfVersion, 0, 0, 0]) + entryCount + infe)
+
+        func meta(extentOffset: UInt64) -> Data {
+            var iloc = ByteWriter(byteOrder: .bigEndian)
+            iloc.writeBytes([0, 0, 0, 0])  // version 0, flags
+            iloc.writeBytes([0x84, 0x40])  // offset_size 8, length_size 4, base_offset_size 4
+            iloc.writeUInt16(1)            // item_count
+            iloc.writeUInt16(1)            // item_ID
+            iloc.writeUInt16(0)            // data_reference_index
+            iloc.writeUInt32(baseOffset)
+            iloc.writeUInt16(1)            // extent_count
+            iloc.writeUInt32(UInt32(extentOffset >> 32))
+            iloc.writeUInt32(UInt32(truncatingIfNeeded: extentOffset))
+            iloc.writeUInt32(UInt32(item.count))
+            return box("meta", Data(count: 4) + iinf + box("iloc", iloc.data))
+        }
+
+        let itemStart = UInt64(ftyp.count + meta(extentOffset: 0).count + 8)
+        return ftyp + meta(extentOffset: extentOffset ?? itemStart - UInt64(baseOffset)) + box("mdat", item)
+    }
+
+    func testHEIFInPlaceWriteUsesBigEndianHeaderOffset() throws {
+        var structure = TIFFStructure(byteOrder: .bigEndian)
+        structure.ifd0.set(tagID: Tag.make, value: .ascii("Apple"))
+        let heif = buildMinimalHEIF(item: exifItem(TIFFSerializer.serialize(structure)) + Data(count: 64))
+        XCTAssertEqual(ImageFormat.detect(from: heif), .heif)
+
+        structure.ifd0.set(tagID: Tag.model, value: .ascii("iPhone"))
+        let written = try EXIFKit.write(structure, to: heif)
+
+        XCTAssertEqual(written.count, heif.count) // fit in place
+        XCTAssertNotNil(written.range(of: Data([0, 0, 0, 6]) + Data("Exif".utf8)))
+        XCTAssertEqual(try EXIFKit.read(from: written).model, "iPhone")
+    }
+
+    func testHEIFWriteThatGrowsAppendsMdat() throws {
+        // A nonzero base_offset makes the patched extent offset relative to it
+        for baseOffset: UInt32 in [0, 16] {
+            var structure = TIFFStructure(byteOrder: .bigEndian)
+            structure.ifd0.set(tagID: Tag.make, value: .ascii("Apple"))
+            let heif = buildMinimalHEIF(item: exifItem(TIFFSerializer.serialize(structure)), baseOffset: baseOffset)
+
+            structure.ifd0.set(tagID: Tag.imageDescription, value: .ascii(String(repeating: "x", count: 200)))
+            let written = try EXIFKit.write(structure, to: heif)
+
+            XCTAssertEqual(try ISOBMFFParser.parse(written).map(\.type), ["ftyp", "meta", "mdat", "mdat"])
+            XCTAssertEqual(try EXIFKit.read(from: written).imageDescription?.count, 200)
+        }
+    }
+
+    func testHEIFReadsIinfVersion1AndZeroHeaderOffset() throws {
+        var structure = TIFFStructure(byteOrder: .littleEndian)
+        structure.ifd0.set(tagID: Tag.make, value: .ascii("Sony"))
+        // Header offset 0: TIFF starts right after the 4-byte field
+        let heif = buildMinimalHEIF(item: Data(count: 4) + TIFFSerializer.serialize(structure), iinfVersion: 1)
+        XCTAssertEqual(try EXIFKit.read(from: heif).make, "Sony")
+    }
+
+    func testHEIFOutOfRangeItemOffsetThrows() {
+        let heif = buildMinimalHEIF(item: exifItem(Data(count: 16)), extentOffset: UInt64.max - 1)
+        XCTAssertThrowsError(try EXIFKit.read(from: heif))
+        XCTAssertThrowsError(try EXIFKit.write(TIFFStructure(byteOrder: .bigEndian), to: heif))
+        XCTAssertThrowsError(try EXIFKit.strip(from: heif))
+    }
+
+    /// Minimal CR3: ftyp("crx ") + moov{uuid(Canon){CMT1, CMT2}} + mdat
+    private func buildMinimalCR3(ifd0: IFD, exif: IFD) -> Data {
+        func cmt(_ type: String, _ ifd: IFD) -> Data {
+            box(type, TIFFSerializer.serialize(TIFFStructure(byteOrder: .littleEndian, ifd0: ifd)))
+        }
+        let uuid = box("uuid", CR3Container.canonUUID + cmt("CMT1", ifd0) + cmt("CMT2", exif))
+        return box("ftyp", Data("crx ".utf8) + Data(count: 4) + Data("crx isom".utf8))
+            + box("moov", uuid) + box("mdat", Data("RAWDATA".utf8))
+    }
+
+    func testCR3WriteNeverMovesMdat() throws {
+        var ifd0 = IFD()
+        ifd0.set(tagID: Tag.make, value: .ascii("Canon"))
+        ifd0.set(tagID: Tag.model, value: .ascii("Canon EOS R5"))
+        var exif = IFD()
+        exif.set(tagID: Tag.isoSpeedRatings, value: .short(100))
+        let cr3 = buildMinimalCR3(ifd0: ifd0, exif: exif)
+        XCTAssertEqual(ImageFormat.detect(from: cr3), .cr3)
+
+        // Shrinking metadata is padded in place, so mdat keeps its offset
+        var structure = try EXIFKit.read(from: cr3)
+        structure.ifd0.set(tagID: Tag.model, value: .ascii("R5"))
+        let written = try EXIFKit.write(structure, to: cr3)
+        XCTAssertEqual(written.count, cr3.count)
+        XCTAssertEqual(written.suffix(7), Data("RAWDATA".utf8))
+        let reparsed = try EXIFKit.read(from: written)
+        XCTAssertEqual(reparsed.model, "R5")
+        XCTAssertEqual(reparsed.iso, 100)
+
+        // Growing would shift mdat (and every absolute offset into it)
+        structure.ifd0.set(tagID: Tag.model, value: .ascii(String(repeating: "x", count: 100)))
+        XCTAssertThrowsError(try EXIFKit.write(structure, to: cr3))
+
+        // No CMT4 box to hold GPS: must not be silently dropped
+        structure = try EXIFKit.read(from: cr3)
+        structure.setGPSCoordinates(latitude: 1, longitude: 2)
+        XCTAssertThrowsError(try EXIFKit.write(structure, to: cr3))
+
+        // Strip leaves valid empty TIFFs (decoders reject zero-filled CMT boxes) and moves nothing
+        let stripped = try EXIFKit.strip(from: cr3)
+        XCTAssertEqual(stripped.count, cr3.count)
+        XCTAssertEqual(try EXIFKit.read(from: stripped).ifd0.entries.count, 0)
+    }
 }

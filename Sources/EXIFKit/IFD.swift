@@ -144,7 +144,8 @@ public struct IFDReader {
         let typeRaw = try reader.readUInt16()
         let count = try reader.readUInt32()
 
-        guard let dataType = EXIFDataType(rawValue: typeRaw) else {
+        // Type 13 (IFD, TIFF Tech Note 1) is a LONG offset; some cameras use it for sub-IFD pointers.
+        guard let dataType = EXIFDataType(rawValue: typeRaw == 13 ? EXIFDataType.long.rawValue : typeRaw) else {
             // Unknown type — skip the 4-byte value/offset field
             let rawBytes = try reader.readBytes(4)
             return IFDEntry(
@@ -343,15 +344,27 @@ public struct IFDWriter {
         baseOffset: UInt32,
         byteOrder: ByteOrder
     ) -> Data {
+        // The overflow area starts after:
+        //   2 bytes (entry count) + 12 bytes * entryCount + 4 bytes (next IFD offset)
+        let overflowStart = baseOffset + 2 + UInt32(ifd.entries.count) * 12 + 4
+        let (table, overflow) = writeIFD(ifd, overflowOffset: overflowStart, byteOrder: byteOrder)
+        return table + overflow
+    }
+
+    /// Serialize the entry table and the overflow area separately, for callers that place them apart.
+    ///
+    /// - Parameter existing: Values already present in the target data, by tag. An entry whose value
+    ///   is unchanged (and fits) points at those bytes instead of being copied into the overflow area.
+    static func writeIFD(
+        _ ifd: IFD,
+        overflowOffset: UInt32,
+        byteOrder: ByteOrder,
+        existing: [UInt16: (value: TagValue, range: Range<Int>)] = [:]
+    ) -> (table: Data, overflow: Data) {
         var writer = ByteWriter(byteOrder: byteOrder)
         var overflowWriter = ByteWriter(byteOrder: byteOrder)
 
-        let entryCount = UInt16(ifd.entries.count)
-        writer.writeUInt16(entryCount)
-
-        // The overflow area starts after:
-        //   2 bytes (entry count) + 12 bytes * entryCount + 4 bytes (next IFD offset)
-        let overflowStart = baseOffset + 2 + UInt32(entryCount) * 12 + 4
+        writer.writeUInt16(UInt16(ifd.entries.count))
 
         for entry in ifd.entries {
             writer.writeUInt16(entry.tagID)
@@ -366,19 +379,20 @@ public struct IFDWriter {
                 for _ in 0..<(4 - valueBytes.count) {
                     writer.writeByte(0)
                 }
+            } else if let old = existing[entry.tagID], old.value == entry.value, valueBytes.count <= old.range.count {
+                // Unchanged value: keep pointing at the bytes already there
+                writer.writeUInt32(UInt32(old.range.lowerBound))
             } else {
                 // Write offset to overflow area
-                let overflowOffset = overflowStart + UInt32(overflowWriter.count)
-                writer.writeUInt32(overflowOffset)
+                writer.writeUInt32(overflowOffset + UInt32(overflowWriter.count))
                 overflowWriter.writeBytes(valueBytes)
                 overflowWriter.padToEven()
             }
         }
 
         writer.writeUInt32(ifd.nextIFDOffset)
-        writer.writeBytes(overflowWriter.data)
 
-        return writer.data
+        return (writer.data, overflowWriter.data)
     }
 
     /// Serialize a TagValue to raw bytes
@@ -391,9 +405,8 @@ public struct IFDWriter {
         case .bytes(let v):
             w.writeBytes(v)
         case .ascii(let v):
-            if let data = v.data(using: .ascii) {
-                w.writeBytes(data)
-            }
+            // Must match TagValue.count (UTF-8 length + NUL), or the entry's count lies about its bytes.
+            w.writeBytes(Data(v.utf8))
             w.writeByte(0)
         case .short(let v):
             w.writeUInt16(v)

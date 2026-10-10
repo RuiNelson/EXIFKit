@@ -244,6 +244,12 @@ public enum EXIFKit {
             return try HEIFContainer.stripEXIF(from: data)
         case .tiff, .dng, .cr2, .nef, .arw, .pef, .orf, .rw2:
             var structure = try read(from: data, format: format)
+            var data = data
+            for pointerTag in [Tag.exifIFDPointer, Tag.gpsIFDPointer] {
+                if let pointer = structure.ifd0.value(for: pointerTag)?.uint32Value {
+                    try? TIFFFileContainer.zeroIFD(in: &data, at: Int(pointer), byteOrder: structure.byteOrder)
+                }
+            }
             structure.exifIFD = nil
             structure.gpsIFD = nil
             structure.ifd0.remove(tagID: Tag.exifIFDPointer)
