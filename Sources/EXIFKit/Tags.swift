@@ -30,10 +30,13 @@ public enum Tag {
     public static let dateTime:         UInt16 = 0x0132
     public static let artist:           UInt16 = 0x013B
     public static let copyright:        UInt16 = 0x8298
+    public static let jpegInterchangeFormat:       UInt16 = 0x0201
+    public static let jpegInterchangeFormatLength: UInt16 = 0x0202
 
     // MARK: Pointers to sub-IFDs
     public static let exifIFDPointer:   UInt16 = 0x8769
     public static let gpsIFDPointer:    UInt16 = 0x8825
+    public static let interopIFDPointer: UInt16 = 0xA005
 
     // MARK: EXIF sub-IFD
     public static let exposureTime:     UInt16 = 0x829A
@@ -119,6 +122,9 @@ public enum Tag {
         copyright: "Copyright",
         exifIFDPointer: "ExifIFDPointer",
         gpsIFDPointer: "GPSInfoIFDPointer",
+        interopIFDPointer: "InteropIFDPointer",
+        jpegInterchangeFormat: "JPEGInterchangeFormat",
+        jpegInterchangeFormatLength: "JPEGInterchangeFormatLength",
         exposureTime: "ExposureTime",
         fNumber: "FNumber",
         exposureProgram: "ExposureProgram",

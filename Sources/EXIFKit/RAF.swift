@@ -66,7 +66,12 @@ public struct RAFContainer {
         let jpegData = Data(data[(data.startIndex + jpegInfo.offset)..<(data.startIndex + jpegInfo.offset + jpegInfo.length)])
 
         // Modify EXIF in the embedded JPEG
-        let newJPEG = try JPEGContainer.writeEXIF(structure, to: jpegData)
+        var newJPEG = try JPEGContainer.writeEXIF(structure, to: jpegData)
+
+        // Zero-pad (harmless after EOI) so a shrink stays in place and growth shifts the
+        // sensor data by whole 512-byte blocks: Fujifilm aligns it to 512.
+        let growth = max(0, newJPEG.count - jpegInfo.length)
+        newJPEG.append(Data(count: jpegInfo.length + (growth + 511) / 512 * 512 - newJPEG.count))
 
         if newJPEG.count == jpegData.count {
             // Same size — simple in-place replacement
@@ -107,7 +112,7 @@ public struct RAFContainer {
         let jpegOffset = Int(try reader.readUInt32())
         let jpegLength = Int(try reader.readUInt32())
 
-        guard jpegOffset > 0, jpegLength > 0,
+        guard jpegOffset > 0, jpegLength >= 2, // room for the SOI check below
               jpegOffset + jpegLength <= data.count else {
             throw EXIFError.unsupportedFormat("RAF: Invalid JPEG offset/length")
         }

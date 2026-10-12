@@ -56,7 +56,7 @@ public struct JPEGContainer {
     /// - Parameter jpegData: The raw JPEG file bytes
     /// - Returns: Parsed TIFF structure containing all EXIF data
     public static func readEXIF(from jpegData: Data) throws -> TIFFStructure {
-        let segments = try parseSegments(jpegData)
+        let segments = try parseSegments(jpegData).segments
 
         guard let exifSegment = segments.first(where: { $0.isEXIF }) else {
             throw EXIFError.invalidJPEG("No EXIF APP1 segment found")
@@ -76,30 +76,34 @@ public struct JPEGContainer {
     ///   - jpegData: The original JPEG file data
     /// - Returns: New JPEG file data with updated EXIF
     public static func writeEXIF(_ structure: TIFFStructure, to jpegData: Data) throws -> Data {
-        var segments = try parseSegments(jpegData)
+        var (segments, sosOffset) = try parseSegments(jpegData)
 
         // Build the new APP1 payload: "Exif\0\0" + TIFF data
         let tiffData = TIFFSerializer.serialize(structure)
         var app1Payload = exifHeader
         app1Payload.append(tiffData)
+        // The segment length field is a UInt16 that counts itself.
+        guard app1Payload.count + 2 <= Int(UInt16.max) else {
+            throw EXIFError.writeFailed("EXIF data is \(app1Payload.count) bytes; a JPEG APP1 segment holds at most 65533")
+        }
 
         // Find existing EXIF segment and replace it, or insert after SOI
         if let exifIndex = segments.firstIndex(where: { $0.isEXIF }) {
             segments[exifIndex].data = app1Payload
         } else {
-            // Insert as the first segment (after SOI, before everything else)
+            // Insert after SOI, but keep a leading JFIF APP0 first as JFIF requires
             let newSegment = MarkerSegment(marker: JPEGMarker.app1, data: app1Payload)
-            segments.insert(newSegment, at: 0)
+            segments.insert(newSegment, at: segments.first?.marker == JPEGMarker.app0 ? 1 : 0)
         }
 
-        return assembleJPEG(segments: segments, originalData: jpegData)
+        return try assembleJPEG(segments: segments, sosOffset: sosOffset, originalData: jpegData)
     }
 
     /// Remove all EXIF data from a JPEG file.
     public static func stripEXIF(from jpegData: Data) throws -> Data {
-        var segments = try parseSegments(jpegData)
+        var (segments, sosOffset) = try parseSegments(jpegData)
         segments.removeAll(where: { $0.isEXIF })
-        return assembleJPEG(segments: segments, originalData: jpegData)
+        return try assembleJPEG(segments: segments, sosOffset: sosOffset, originalData: jpegData)
     }
 
     // MARK: - Segment Parsing
@@ -108,8 +112,9 @@ public struct JPEGContainer {
     ///
     /// This extracts all segments BEFORE the SOS marker.
     /// Everything from SOS onward (the actual image data) is treated as a
-    /// single opaque blob that we pass through untouched.
-    private static func parseSegments(_ data: Data) throws -> [MarkerSegment] {
+    /// single opaque blob that we pass through untouched. `sosOffset` is nil when
+    /// the data ends before SOS (enough for reading, not for rewriting).
+    private static func parseSegments(_ data: Data) throws -> (segments: [MarkerSegment], sosOffset: Int?) {
         guard data.count >= 4 else {
             throw EXIFError.invalidJPEG("File too small")
         }
@@ -129,12 +134,18 @@ public struct JPEGContainer {
                 throw EXIFError.invalidJPEG("Expected marker at offset \(offset)")
             }
 
+            // Any marker may be preceded by 0xFF fill bytes
+            if data[data.startIndex + offset + 1] == JPEGMarker.prefix {
+                offset += 1
+                continue
+            }
+
             let markerType = data[data.startIndex + offset + 1]
             offset += 2
 
             // SOS marks the beginning of compressed image data — stop parsing
             if markerType == JPEGMarker.sos {
-                break
+                return (segments, offset - 2)
             }
 
             // Skip standalone markers (no length field)
@@ -169,14 +180,19 @@ public struct JPEGContainer {
             offset += payloadLength
         }
 
-        return segments
+        return (segments, nil)
     }
 
     /// Reassemble a JPEG file from segments + the original SOS/image data.
     ///
     /// We reconstruct the header segments and append the original image data
     /// (everything from SOS onward) unchanged.
-    private static func assembleJPEG(segments: [MarkerSegment], originalData: Data) -> Data {
+    private static func assembleJPEG(segments: [MarkerSegment], sosOffset: Int?, originalData: Data) throws -> Data {
+        // Without SOS there is no image data to carry over; writing would silently drop it.
+        guard let sosOffset else {
+            throw EXIFError.invalidJPEG("No SOS marker found")
+        }
+
         var output = Data()
 
         // SOI
@@ -187,47 +203,15 @@ public struct JPEGContainer {
         for segment in segments {
             output.append(JPEGMarker.prefix)
             output.append(segment.marker)
-            // Length = payload size + 2 (for the length field itself)
-            // JPEG segment lengths are UInt16, max 65535. Segments exceeding
-            // this would need to be split, but EXIF data rarely exceeds 64KB.
-            let rawLength = segment.data.count + 2
-            let length = UInt16(clamping: rawLength)
+            // Length = payload size + 2 (for the length field itself); parsed segments always fit
+            let length = UInt16(segment.data.count + 2)
             output.append(UInt8(length >> 8))
             output.append(UInt8(length & 0xFF))
             output.append(segment.data)
         }
 
-        // Find SOS in original data and append everything from there
-        if let sosOffset = findSOS(in: originalData) {
-            output.append(originalData[sosOffset...])
-        }
+        output.append(originalData[(originalData.startIndex + sosOffset)...])
 
         return output
-    }
-
-    /// Find the byte offset of the SOS marker in JPEG data
-    private static func findSOS(in data: Data) -> Data.Index? {
-        var i = data.startIndex + 2 // skip SOI
-        while i < data.endIndex - 1 {
-            if data[i] == JPEGMarker.prefix && data[i + 1] == JPEGMarker.sos {
-                return i
-            }
-            if data[i] == JPEGMarker.prefix {
-                let markerType = data[i + 1]
-                // Skip standalone markers
-                if markerType >= 0xD0 && markerType <= 0xD9 {
-                    i += 2
-                    continue
-                }
-                // Skip segment by reading its length
-                if i + 3 < data.endIndex {
-                    let length = Int(data[i + 2]) << 8 | Int(data[i + 3])
-                    i += 2 + length
-                    continue
-                }
-            }
-            i += 1
-        }
-        return nil
     }
 }

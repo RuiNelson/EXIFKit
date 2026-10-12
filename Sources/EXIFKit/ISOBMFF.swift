@@ -32,8 +32,7 @@ public struct ISOBMFFBox: Sendable {
     /// Is this a "full box" (has version + flags)?
     public var isFullBox: Bool {
         // These box types are defined as FullBox in the spec
-        ["meta", "hdlr", "pitm", "iloc", "iinf", "infe", "iprp",
-         "ipco", "ispe", "colr", "iref", "idat"].contains(type)
+        ["meta", "hdlr", "pitm", "iloc", "iinf", "infe", "ispe", "iref", "ipma"].contains(type)
     }
 
     /// For full boxes: version byte
@@ -151,7 +150,7 @@ public struct ISOBMFFParser {
                               UInt64(data[data.startIndex + pos + 13]) << 16 |
                               UInt64(data[data.startIndex + pos + 14]) << 8 |
                               UInt64(data[data.startIndex + pos + 15])
-                boxSize = Int(extSize)
+                boxSize = Int(clamping: extSize)
             } else if size == 0 {
                 // Box extends to end of data
                 boxSize = (offset + length) - pos
@@ -160,7 +159,7 @@ public struct ISOBMFFParser {
             }
 
             guard boxSize >= headerSize else { break }
-            if pos + boxSize > data.count {
+            if boxSize > data.count - pos {
                 // Truncated box — take what we can
                 boxSize = data.count - pos
             }
@@ -185,8 +184,8 @@ public struct ISOBMFFParser {
                     // FullBox: skip version(1) + flags(3)
                     skipBytes = 4
                 } else if type == "iinf" {
-                    // FullBox + entry_count(2): skip version(1) + flags(3) + count(2)
-                    skipBytes = 6
+                    // FullBox + entry_count: 2 bytes in version 0, 4 bytes after
+                    skipBytes = data[data.startIndex + payloadStart] == 0 ? 6 : 8
                 } else if type == "uuid" {
                     // UUID identifier prefix (16 bytes) before child boxes
                     skipBytes = 16
@@ -241,142 +240,55 @@ public struct ISOBMFFParser {
 
     /// HEIF-style: find the Exif item through meta/iloc
     private static func extractFromMetaBox(boxes: [ISOBMFFBox], fileData: Data) -> Data? {
-        // Find top-level meta box
-        guard let meta = boxes.first(where: { $0.type == "meta" }) else { return nil }
+        guard let meta = boxes.first(where: { $0.type == "meta" }),
+              let iloc = meta.child(ofType: "iloc"),
+              let locations = try? ItemLocations(iloc) else { return nil }
 
-        // Look for 'Exif' item in iinf (item info)
-        guard let iloc = meta.child(ofType: "iloc") else { return nil }
-
-        // Parse iloc to find item locations
-        // iloc is a FullBox: version(1) + flags(3) are in the box data prefix,
-        // which payloadData already strips. We read version from the box directly.
-        let ilocData = iloc.payloadData
-        guard ilocData.count >= 4 else { return nil }
-
-        let ilocVersion = iloc.version ?? 0
-        let offsetSize = Int((ilocData[ilocData.startIndex] >> 4) & 0x0F)
-        let lengthSize = Int(ilocData[ilocData.startIndex] & 0x0F)
-        let baseOffsetSize = Int((ilocData[ilocData.startIndex + 1] >> 4) & 0x0F)
-
-        var reader = ByteReader(data: Data(ilocData), byteOrder: .bigEndian)
-        // Byte 0: offset_size(4) | length_size(4)
-        // Byte 1: base_offset_size(4) | index_size(4) [index_size only in version >= 1, else reserved]
-        // Byte 2+: item_count
-        reader.offset = 2
-
-        let itemCount: Int
-        if ilocVersion < 2 {
-            itemCount = Int((try? reader.readUInt16()) ?? 0)
-        } else {
-            itemCount = Int((try? reader.readUInt32()) ?? 0)
-        }
-
-        // Find the Exif item ID from iinf
+        // 0 = no Exif item declared: try every item and keep the first that holds TIFF data
         let exifItemID = findExifItemID(in: meta)
 
-        // Scan iloc entries to find the Exif item's offset and length
-        for _ in 0..<itemCount {
-            let itemID: UInt32
-            if ilocVersion < 2 {
-                itemID = UInt32((try? reader.readUInt16()) ?? 0)
-            } else {
-                itemID = (try? reader.readUInt32()) ?? 0
-            }
-
-            // Construction method (version >= 1)
-            if ilocVersion >= 1 {
-                _ = try? reader.readUInt16() // construction_method
-            }
-
-            _ = try? reader.readUInt16() // data_reference_index
-
-            // Base offset
-            let baseOffset: UInt64
-            switch baseOffsetSize {
-            case 4: baseOffset = UInt64((try? reader.readUInt32()) ?? 0)
-            case 8:
-                let hi = UInt64((try? reader.readUInt32()) ?? 0)
-                let lo = UInt64((try? reader.readUInt32()) ?? 0)
-                baseOffset = (hi << 32) | lo
-            default: baseOffset = 0
-            }
-
-            let extentCount = Int((try? reader.readUInt16()) ?? 0)
-
-            for _ in 0..<extentCount {
-                let extentOffset: UInt64
-                switch offsetSize {
-                case 4: extentOffset = UInt64((try? reader.readUInt32()) ?? 0)
-                case 8:
-                    let hi = UInt64((try? reader.readUInt32()) ?? 0)
-                    let lo = UInt64((try? reader.readUInt32()) ?? 0)
-                    extentOffset = (hi << 32) | lo
-                default: extentOffset = 0
-                }
-
-                let extentLength: UInt64
-                switch lengthSize {
-                case 4: extentLength = UInt64((try? reader.readUInt32()) ?? 0)
-                case 8:
-                    let hi = UInt64((try? reader.readUInt32()) ?? 0)
-                    let lo = UInt64((try? reader.readUInt32()) ?? 0)
-                    extentLength = (hi << 32) | lo
-                default: extentLength = 0
-                }
-
-                if itemID == exifItemID || exifItemID == 0 {
-                    let start = Int(baseOffset + extentOffset)
-                    let length = Int(extentLength)
-                    if start >= 0 && start + length <= fileData.count && length > 8 {
-                        var exifData = Data(fileData[(fileData.startIndex + start)..<(fileData.startIndex + start + length)])
-
-                        // HEIF EXIF items may have a 4-byte prefix (Exif offset)
-                        // followed by "Exif\0\0" + TIFF data, or just TIFF data
-                        if exifData.count > 10 {
-                            // Check for "Exif\0\0" header
-                            let possibleExif = exifData.prefix(10)
-                            if let str = String(data: Data(possibleExif.dropFirst(4).prefix(4)), encoding: .ascii),
-                               str == "Exif" {
-                                // Skip 4-byte offset prefix + 6 bytes "Exif\0\0"
-                                exifData = Data(exifData.dropFirst(10))
-                            } else if possibleExif[possibleExif.startIndex] == 0x45 &&
-                                      possibleExif[possibleExif.startIndex + 1] == 0x78 {
-                                // Starts with "Ex" — skip "Exif\0\0"
-                                exifData = Data(exifData.dropFirst(6))
-                            }
-                            // Check if it starts with TIFF header
-                            let b0 = exifData[exifData.startIndex]
-                            let b1 = exifData[exifData.startIndex + 1]
-                            if (b0 == 0x49 && b1 == 0x49) || (b0 == 0x4D && b1 == 0x4D) {
-                                return exifData
-                            }
-                        }
-                    }
-                }
+        for item in locations.items where item.constructionMethod == 0 && (exifItemID == 0 || item.itemID == exifItemID) {
+            for extent in item.extents {
+                guard let range = item.fileRange(of: extent, fileSize: fileData.count) else { continue }
+                let itemData = fileData[(fileData.startIndex + range.lowerBound)..<(fileData.startIndex + range.upperBound)]
+                if let tiff = tiffData(inExifItem: itemData) { return tiff }
             }
         }
 
         return nil
     }
 
-    /// Find the item ID of the "Exif" item from the iinf box
-    private static func findExifItemID(in meta: ISOBMFFBox) -> UInt32 {
+    /// The TIFF block inside an Exif item.
+    ///
+    /// ISO 23008-12 puts a big-endian UInt32 offset to the TIFF header first (counted from the
+    /// end of that field, usually 6 to skip "Exif\0\0"). Some writers, including EXIFKit before
+    /// it wrote that field big-endian, need the fallbacks: "Exif\0\0" after the field, bare "Exif\0\0", bare TIFF.
+    static func tiffData(inExifItem item: Data) -> Data? {
+        let bytes = Data(item)
+        func tiff(at i: Int) -> Data? {
+            guard i >= 0, i + 8 <= bytes.count, bytes[i] == bytes[i + 1],
+                  bytes[i] == 0x49 || bytes[i] == 0x4D else { return nil }
+            return bytes.subdata(in: i..<bytes.count)
+        }
+        var reader = ByteReader(data: bytes, byteOrder: .bigEndian)
+        let headerOffset = (try? reader.readUInt32()).map(Int.init) ?? 0
+        return tiff(at: 4 + headerOffset) ?? tiff(at: 10) ?? tiff(at: 6) ?? tiff(at: 0)
+    }
+
+    /// Find the item ID of the "Exif" item from the iinf box (0 if none)
+    static func findExifItemID(in meta: ISOBMFFBox) -> UInt32 {
         guard let iinf = meta.child(ofType: "iinf") else { return 0 }
 
         // Each infe box describes an item
         for infe in iinf.children(ofType: "infe") {
-            let infeData = infe.payloadData
-            guard infeData.count >= 8 else { continue }
+            // Version 2: item_id(2), version 3: item_id(4); then item_protection_index(2) + item_type(4)
+            var reader = ByteReader(data: infe.payloadData, byteOrder: .bigEndian)
+            guard let itemID = try? (infe.version ?? 0) >= 3 ? reader.readUInt32() : UInt32(reader.readUInt16()),
+                  (try? reader.readUInt16()) != nil,
+                  let itemType = try? reader.readBytes(4) else { continue }
 
-            // Version 2+: item_id(2) + item_protection_index(2) + item_type(4)
-            var reader = ByteReader(data: Data(infeData), byteOrder: .bigEndian)
-            let itemID = (try? reader.readUInt16()) ?? 0
-            _ = try? reader.readUInt16() // protection index
-            let typeBytes = (try? reader.readBytes(4)) ?? Data()
-            let itemType = String(data: typeBytes, encoding: .ascii) ?? ""
-
-            if itemType == "Exif" {
-                return UInt32(itemID)
+            if itemType == Data("Exif".utf8) {
+                return itemID
             }
         }
 
@@ -427,5 +339,85 @@ public struct ISOBMFFParser {
             }
         }
         return nil
+    }
+}
+
+// MARK: - Item Locations (iloc)
+
+/// A parsed `iloc` box: where each item's bytes live.
+struct ItemLocations {
+    struct Extent {
+        let offset: UInt64
+        let length: UInt64
+        /// Positions of the offset/length fields within the iloc box's `payloadData`, for in-place patching
+        let offsetFieldPosition: Int
+        let lengthFieldPosition: Int
+    }
+
+    struct Item {
+        let itemID: UInt32
+        /// 0 = file offsets, 1 = offsets into `idat`, 2 = item references
+        let constructionMethod: UInt16
+        let baseOffset: UInt64
+        let extents: [Extent]
+
+        /// The extent's byte range in the file, or nil if it doesn't fit within `fileSize`
+        func fileRange(of extent: Extent, fileSize: Int) -> Range<Int>? {
+            let (start, overflow) = baseOffset.addingReportingOverflow(extent.offset)
+            guard !overflow, start <= UInt64(fileSize), extent.length <= UInt64(fileSize) - start else { return nil }
+            return Int(start)..<Int(start + extent.length)
+        }
+    }
+
+    /// Byte widths of the extent offset/length fields (0, 4 or 8)
+    let offsetSize: Int
+    let lengthSize: Int
+    let items: [Item]
+
+    init(_ iloc: ISOBMFFBox) throws {
+        let version = iloc.version ?? 0
+        var reader = ByteReader(data: iloc.payloadData, byteOrder: .bigEndian)
+        let sizes = try reader.readByte()
+        let moreSizes = try reader.readByte()
+        let offsetSize = Int(sizes >> 4)
+        let lengthSize = Int(sizes & 0x0F)
+        let baseOffsetSize = Int(moreSizes >> 4)
+        let indexSize = version >= 1 ? Int(moreSizes & 0x0F) : 0 // reserved in version 0
+
+        func read(_ size: Int) throws -> UInt64 {
+            switch size {
+            case 0: return 0
+            case 4: return UInt64(try reader.readUInt32())
+            case 8: return try UInt64(reader.readUInt32()) << 32 | UInt64(reader.readUInt32())
+            default: throw EXIFError.invalidHEIF("Invalid iloc field size \(size)")
+            }
+        }
+
+        let itemCount = try version < 2 ? Int(reader.readUInt16()) : Int(reader.readUInt32())
+        var items: [Item] = []
+        for _ in 0..<itemCount {
+            let itemID = try version < 2 ? UInt32(reader.readUInt16()) : reader.readUInt32()
+            let constructionMethod = try version >= 1 ? reader.readUInt16() & 0x0F : 0
+            _ = try reader.readUInt16() // data_reference_index
+            let baseOffset = try read(baseOffsetSize)
+            let extentCount = Int(try reader.readUInt16())
+
+            var extents: [Extent] = []
+            for _ in 0..<extentCount {
+                _ = try read(indexSize) // extent_index
+                let offsetPosition = reader.offset
+                let offset = try read(offsetSize)
+                let lengthPosition = reader.offset
+                let length = try read(lengthSize)
+                extents.append(Extent(offset: offset, length: length,
+                                      offsetFieldPosition: offsetPosition, lengthFieldPosition: lengthPosition))
+            }
+            items.append(Item(itemID: itemID, constructionMethod: constructionMethod,
+                              baseOffset: baseOffset, extents: extents))
+        }
+
+        self.offsetSize = offsetSize
+        self.lengthSize = lengthSize
+        self.items = items
     }
 }

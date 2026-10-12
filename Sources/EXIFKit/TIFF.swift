@@ -138,11 +138,8 @@ public struct TIFFStructure: Sendable {
               let source = sourceTIFFData else { return nil }
 
         // Method 1: JPEG thumbnail (most common)
-        let jpegOffsetTag: UInt16 = 0x0201 // JPEGInterchangeFormat
-        let jpegLengthTag: UInt16 = 0x0202 // JPEGInterchangeFormatLength
-
-        if let offset = ifd1.value(for: jpegOffsetTag)?.uint32Value,
-           let length = ifd1.value(for: jpegLengthTag)?.uint32Value {
+        if let offset = ifd1.value(for: Tag.jpegInterchangeFormat)?.uint32Value,
+           let length = ifd1.value(for: Tag.jpegInterchangeFormatLength)?.uint32Value {
             let start = Int(offset)
             let size = Int(length)
             if start >= 0 && start + size <= source.count && size > 0 {
@@ -320,111 +317,67 @@ extension TIFFStructure {
 public struct TIFFSerializer {
 
     /// Serialize a TIFFStructure to a complete TIFF data block.
+    ///
+    /// Layout: [header][IFD0][IFD1][EXIF][GPS][Interop][thumbnail].
+    /// Data that lives outside the IFDs (Interop IFD, IFD1's JPEG thumbnail) is copied
+    /// from the source block; if it can't be, its pointer is dropped rather than left dangling.
     public static func serialize(_ structure: TIFFStructure) -> Data {
         let byteOrder = structure.byteOrder
-        var writer = ByteWriter(byteOrder: byteOrder)
-
-        // TIFF Header (8 bytes)
-        if byteOrder == .littleEndian {
-            writer.writeBytes([0x49, 0x49]) // "II"
-        } else {
-            writer.writeBytes([0x4D, 0x4D]) // "MM"
-        }
-        writer.writeUInt16(42) // Magic
-
-        // We'll write IFD0 starting at offset 8 (right after the header).
-        // But first we need to build all the IFDs to know their sizes and set
-        // the correct pointer offsets.
-
-        // Build a mutable copy to inject sub-IFD pointers
         var ifd0 = structure.ifd0
-        let exifIFD = structure.exifIFD
+        var ifd1 = structure.ifd1
+        var exifIFD = structure.exifIFD
         let gpsIFD = structure.gpsIFD
-        let ifd1 = structure.ifd1
 
-        // We'll lay out data sequentially:
-        //   [TIFF Header 8 bytes]
-        //   [IFD0]
-        //   [IFD1] (if present)
-        //   [EXIF sub-IFD]
-        //   [GPS sub-IFD]
-        //
-        // We need a two-pass approach: first compute sizes, then write with correct offsets.
+        var interopIFD: IFD? = nil
+        if let pointer = exifIFD?.remove(tagID: Tag.interopIFDPointer)?.value.uint32Value {
+            interopIFD = structure.sourceTIFFData.flatMap {
+                try? IFDReader.readIFD(from: $0, at: Int(pointer), byteOrder: byteOrder)
+            }
+        }
 
-        // Remove old sub-IFD pointers (we'll recalculate them)
+        let thumbnail = structure.thumbnailData
+        ifd1?.remove(tagID: Tag.jpegInterchangeFormat)
+        if thumbnail == nil { ifd1?.remove(tagID: Tag.jpegInterchangeFormatLength) }
+
+        // Placeholder pointers so every IFD has its final entry count before sizes are measured.
+        // An IFD's serialized size doesn't depend on its position, so offsets can be laid out up front.
         ifd0.remove(tagID: Tag.exifIFDPointer)
         ifd0.remove(tagID: Tag.gpsIFDPointer)
-
-        // Compute IFD0 size (without sub-IFD pointers yet — we'll add them, which changes size)
-        // Add placeholder pointers so the size calculation includes them
-        if exifIFD != nil {
-            ifd0.set(tagID: Tag.exifIFDPointer, value: .long(0)) // placeholder
-        }
-        if gpsIFD != nil {
-            ifd0.set(tagID: Tag.gpsIFDPointer, value: .long(0)) // placeholder
+        if exifIFD != nil { ifd0.set(tagID: Tag.exifIFDPointer, value: .long(0)) }
+        if gpsIFD != nil { ifd0.set(tagID: Tag.gpsIFDPointer, value: .long(0)) }
+        if interopIFD != nil { exifIFD?.set(tagID: Tag.interopIFDPointer, value: .long(0)) }
+        if let thumbnail {
+            ifd1?.set(tagID: Tag.jpegInterchangeFormat, value: .long(0))
+            ifd1?.set(tagID: Tag.jpegInterchangeFormatLength, value: .long(UInt32(thumbnail.count)))
         }
 
+        func size(_ ifd: IFD?) -> UInt32 {
+            ifd.map { UInt32(IFDWriter.writeIFD($0, baseOffset: 0, byteOrder: byteOrder).count) } ?? 0
+        }
         let ifd0Offset: UInt32 = 8
+        let ifd1Offset = ifd0Offset + size(ifd0)
+        let exifOffset = ifd1Offset + size(ifd1)
+        let gpsOffset = exifOffset + size(exifIFD)
+        let interopOffset = gpsOffset + size(gpsIFD)
+        let thumbnailOffset = interopOffset + size(interopIFD)
 
-        // Compute how many bytes IFD0 will take
-        let ifd0Data = IFDWriter.writeIFD(ifd0, baseOffset: ifd0Offset, byteOrder: byteOrder)
-        var currentOffset = ifd0Offset + UInt32(ifd0Data.count)
+        if exifIFD != nil { ifd0.set(tagID: Tag.exifIFDPointer, value: .long(exifOffset)) }
+        if gpsIFD != nil { ifd0.set(tagID: Tag.gpsIFDPointer, value: .long(gpsOffset)) }
+        if interopIFD != nil { exifIFD?.set(tagID: Tag.interopIFDPointer, value: .long(interopOffset)) }
+        if thumbnail != nil { ifd1?.set(tagID: Tag.jpegInterchangeFormat, value: .long(thumbnailOffset)) }
+        ifd0.nextIFDOffset = ifd1 != nil ? ifd1Offset : 0
+        ifd1?.nextIFDOffset = 0
+        interopIFD?.nextIFDOffset = 0
 
-        // IFD1
-        var ifd1Data: Data? = nil
-        if var ifd1 = ifd1 {
-            ifd1.nextIFDOffset = 0
-            let data = IFDWriter.writeIFD(ifd1, baseOffset: currentOffset, byteOrder: byteOrder)
-            ifd1Data = data
-            currentOffset += UInt32(data.count)
-        }
-
-        // EXIF sub-IFD
-        let exifOffset = currentOffset
-        var exifData: Data? = nil
-        if let exif = exifIFD {
-            let data = IFDWriter.writeIFD(exif, baseOffset: exifOffset, byteOrder: byteOrder)
-            exifData = data
-            currentOffset += UInt32(data.count)
-        }
-
-        // GPS sub-IFD
-        let gpsOffset = currentOffset
-        var gpsData: Data? = nil
-        if let gps = gpsIFD {
-            let data = IFDWriter.writeIFD(gps, baseOffset: gpsOffset, byteOrder: byteOrder)
-            gpsData = data
-            currentOffset += UInt32(data.count)
-        }
-
-        // Now rebuild IFD0 with correct pointers
-        if exifIFD != nil {
-            ifd0.set(tagID: Tag.exifIFDPointer, value: .long(exifOffset))
-        }
-        if gpsIFD != nil {
-            ifd0.set(tagID: Tag.gpsIFDPointer, value: .long(gpsOffset))
-        }
-
-        // Set IFD0's next-IFD pointer
-        if ifd1Data != nil {
-            ifd0.nextIFDOffset = ifd0Offset + UInt32(ifd0Data.count) // right after IFD0
-        } else {
-            ifd0.nextIFDOffset = 0
-        }
-
-        // Re-serialize IFD0 with the correct pointers
-        // (this changes the offsets of everything after it, but since IFD0's
-        //  entry count hasn't changed, its serialized size is the same)
-        let finalIFD0Data = IFDWriter.writeIFD(ifd0, baseOffset: ifd0Offset, byteOrder: byteOrder)
-
-        // Write offset to IFD0
+        var writer = ByteWriter(byteOrder: byteOrder)
+        writer.writeBytes(byteOrder == .littleEndian ? [0x49, 0x49] : [0x4D, 0x4D]) // "II" / "MM"
+        writer.writeUInt16(42) // Magic
         writer.writeUInt32(ifd0Offset)
-
-        // Write all IFD data
-        writer.writeBytes(finalIFD0Data)
-        if let d = ifd1Data { writer.writeBytes(d) }
-        if let d = exifData { writer.writeBytes(d) }
-        if let d = gpsData { writer.writeBytes(d) }
+        for (ifd, offset) in [(ifd0, ifd0Offset), (ifd1, ifd1Offset), (exifIFD, exifOffset),
+                              (gpsIFD, gpsOffset), (interopIFD, interopOffset)] {
+            if let ifd { writer.writeBytes(IFDWriter.writeIFD(ifd, baseOffset: offset, byteOrder: byteOrder)) }
+        }
+        if let thumbnail { writer.writeBytes(thumbnail) }
 
         return writer.data
     }
