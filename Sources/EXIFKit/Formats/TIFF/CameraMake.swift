@@ -6,7 +6,7 @@ public enum CameraMake: String, CaseIterable, Sendable, Codable {
     case apple, samsung, xiaomi, vivo, oppo, honor, motorola, lenovo, huawei, google, onePlus
 
     /// Lowercased substrings that identify this make in an EXIF `Make` string.
-    internal var matchStrings: [String] {
+    var matchStrings: [String] {
         switch self {
         case .phaseOne: ["phase one"]
         case .pentax: ["pentax", "ricoh"]

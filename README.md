@@ -2,7 +2,7 @@
 
 A Swift library for reading, writing and removing EXIF metadata through random-access file handles. Read metadata from memory, local files, HTTP servers or your own storage backend without loading the image into memory. The library has no external runtime dependencies.
 
-Supports JPEG, PNG, TIFF, DNG, CR2, CR3, NEF, ARW, RAF, ORF, RW2, PEF and HEIF/HEIC/AVIF and JPEG XL. Requires Swift 6.3+, macOS 12+, iOS/tvOS 15+ or watchOS 8+.
+Supports JPEG, PNG, TIFF, DNG, CR2, CR3, NEF, ARW, RAF, ORF, RW2, PEF and HEIF/HEIC/AVIF and JPEG XL. Requires Swift 6.3+, macOS 11+, iOS/tvOS/Mac Catalyst 14+, watchOS 7+ or visionOS 1+.
 
 ## Installation
 

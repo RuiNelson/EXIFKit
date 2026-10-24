@@ -93,17 +93,19 @@ public struct URational: Equatable, Hashable, CustomStringConvertible, Sendable 
     }
 }
 
-extension URational {
+public extension URational {
     /// The same value with numerator and denominator divided by their greatest common divisor
-    public var reduced: URational {
+    var reduced: URational {
         var a = numerator, b = denominator
-        while b != 0 { (a, b) = (b, a % b) }
+        while b != 0 {
+            (a, b) = (b, a % b)
+        }
         guard a > 1 else { return self }
         return URational(numerator: numerator / a, denominator: denominator / a)
     }
 
     /// The value read as an exposure time in seconds: "1/250 s", "30 s" or "0.4 s"
-    public var exposureTimeString: String {
+    var exposureTimeString: String {
         let fraction = reduced
         if fraction.numerator == 1 && fraction.denominator > 1 {
             return "1/\(fraction.denominator) s"
@@ -113,7 +115,9 @@ extension URational {
         }
 
         var decimal = String(format: "%.1f", fraction.doubleValue)
-        while decimal.hasSuffix("0") || decimal.hasSuffix(".") { decimal.removeLast() }
+        while decimal.hasSuffix("0") || decimal.hasSuffix(".") {
+            decimal.removeLast()
+        }
         return decimal + " s"
     }
 }
