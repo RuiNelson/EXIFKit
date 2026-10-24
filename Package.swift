@@ -3,7 +3,15 @@ import PackageDescription
 
 let package = Package(
     name: "EXIFKit",
-    platforms: [.macOS(.v12), .iOS(.v15), .tvOS(.v15), .watchOS(.v8)],
+    platforms: [
+        .macOS("10.15.4"),
+        .iOS("13.4"),
+        .macCatalyst("13.4"),
+        .tvOS("13.4"),
+        .visionOS(.v1),
+        .watchOS("6.2"),
+        .custom("android", versionString: "28"),
+    ],
     products: [.library(name: "EXIFKit", targets: ["EXIFKit"])],
     dependencies: [
         .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),

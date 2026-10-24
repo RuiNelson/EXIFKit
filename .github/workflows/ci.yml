@@ -30,3 +30,28 @@ jobs:
       - run: swift --version
       - run: swift build
       - run: swift test
+
+  android:
+    name: Android (aarch64)
+    runs-on: ubuntu-24.04
+    container: swift:6.3.3-noble
+    timeout-minutes: 30
+    env:
+      ANDROID_NDK_HOME: /opt/android-ndk-r27d
+    steps:
+      - uses: actions/checkout@v5
+      - run: swift --version
+      - name: Checkout Swift SDK build scripts
+        uses: actions/checkout@v5
+        with:
+          repository: swiftlang/github-workflows
+          ref: "0.0.11"
+          path: github-workflows
+      - name: Install Swift SDK for Android and build
+        run: |
+          github-workflows/.github/workflows/scripts/install-and-build-with-sdk.sh \
+            --android \
+            --android-sdk-triple=aarch64-unknown-linux-android28 \
+            --android-ndk-version=r27d \
+            --build-command="swift build --scratch-path /tmp/swift-android-build" \
+            6.3.3
