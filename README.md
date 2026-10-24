@@ -28,6 +28,9 @@ print(metadata.latitude, metadata.longitude)
 
 // The thumbnail is fetched only when requested.
 let thumbnail = try await metadata.readThumbnail()
+
+// Every tag, as readable text.
+print(EXIFKit.dump(metadata))
 ```
 
 All sources use the same parser. Format detection inspects contents; pass `format: .nef`, for example, to specify a format explicitly.
@@ -61,7 +64,7 @@ let metadata = try await EXIFKit.read(from: source, options: options)
 
 ## Writing and removing metadata
 
-Write to a separate destination implementing `AbstractFileHandle`. Unchanged data is copied in blocks of at most 1 MiB, reading the next block while the current one is written; only metadata is assembled in memory. Writing from HTTP therefore transfers the image data needed to produce the output file.
+`write` and `strip` never modify the source. Each one produces a complete new file in a separate destination: a copy of the source with the metadata replaced (`write`) or removed (`strip`).
 
 ```swift
 var metadata = try await EXIFKit.read(from: source)
@@ -69,6 +72,7 @@ metadata.setGPSCoordinates(latitude: 38.7223, longitude: -9.1393)
 metadata.ifd0.set(tagID: Tag.artist, value: .ascii("Photographer"))
 try metadata.setThumbnail(thumbnailJPEG) // or nil to remove it
 
+// LocalFileHandle only opens existing files, so create the destination first.
 FileManager.default.createFile(atPath: outputURL.path, contents: nil)
 let destination = try LocalFileHandle(url: outputURL)
 try await EXIFKit.write(metadata, from: source, to: destination)
@@ -78,14 +82,25 @@ let clean = try LocalFileHandle(url: cleanURL)
 try await EXIFKit.strip(from: source, to: clean)
 ```
 
-`LocalFileHandle` opens an existing file; it never creates one, so create the destination first as shown above. Each write/strip validates its edit plan before truncating the destination. Source and destination must refer to different underlying storage; identical handles and local files sharing an inode are rejected. Custom wrappers must also respect this requirement. An I/O failure or cancellation can leave a partial destination. To replace an existing file, write to a temporary file and rename it after success.
+### How the output is produced
 
-In-memory convenience overloads use the same streaming writer:
+Only the new metadata is built in memory. Everything else, including the image data, is copied from the source to the destination in blocks of at most 1 MiB, and the next block is read while the current one is written. Memory use stays small even for large files, but every byte of the source is read: writing from an HTTP source downloads the whole image.
+
+The whole edit is planned and validated before the destination is touched. An impossible edit, such as EXIF too large for a JPEG, throws and leaves the destination unchanged. Otherwise the destination is truncated and written from the beginning.
+
+### Replacing the original file
+
+The destination must be a different file from the source, because the source is still being read while the destination is written. EXIFKit rejects the same handle passed twice, and two local handles that refer to the same file (same inode). It can't check custom handle types, so they must guarantee this themselves.
+
+An I/O failure or cancellation stops the write and can leave a partial destination. To update a file in place, write to a temporary file, then rename it over the original once the call succeeds.
+
+### In-memory data
+
+For images already in memory, the `Data` overloads return the new file as `Data`. They run the same writer with in-memory handles:
 
 ```swift
 let editedData = try await EXIFKit.write(metadata, to: imageData)
 let cleanData = try await EXIFKit.strip(from: imageData)
-let report = EXIFKit.dump(metadata)
 ```
 
 ### HTTP destinations
@@ -95,21 +110,35 @@ let destination = try await HTTPFileHandle(url: outputURL)
 try await EXIFKit.write(metadata, from: source, to: destination)
 ```
 
-`HTTPFileHandle` stages changes in a sparse temporary file, and downloads untouched ranges only when needed. `synchronize()` sends dirty ranges with PATCH. `EXIFKit.write` and `strip` call it automatically; when using `write` or `truncate` directly, call it after completing your edits. Unsynchronised changes are discarded when the handle is released.
+An `HTTPFileHandle` doesn't upload each write as it happens. Writes go to a local temporary file, which is sparse, so only written regions use disk space. `synchronize()` then uploads the changed ranges. Ranges that weren't written are downloaded from the server only when something reads them.
 
-The server's PATCH contract is `Content-Type: application/octet-stream` with `Content-Range: bytes start-end/length`. It must apply the body at that offset and set the resource to the declared length. An empty PATCH with `Content-Range: bytes */length` resizes it. HTTP 405, 415 or 501 selects a streamed PUT fallback of the complete resource; other HTTP failures are returned to the caller. A fallback preserves untouched bytes by fetching missing ranges first. Later synchronisations reuse PUT when PATCH was rejected. Uploads and response handling have bounded memory use.
+`EXIFKit.write` and `strip` call `synchronize()` for you. If you call the handle's `write` or `truncate` yourself, call `synchronize()` when you're done: unsynchronized changes are discarded when the handle is released.
 
-Format constraints:
+#### Server requirements
 
-- JPEG EXIF must fit in a single APP1 segment. PNG stores it in an `eXIf` chunk.
-- TIFF and TIFF-based RAW preserve image offsets and reuse unchanged out-of-line values, including MakerNotes. Their byte order cannot be changed during an edit, and writing requires 32-bit file offsets. `strip` removes and zeros the referenced EXIF/GPS/interoperability directories; IFD0, thumbnails and image layout tags are retained.
-- HEIF uses declared Exif items and their `iloc` extents, including fragmented items and `idat` storage. Larger replacements are appended in a new `mdat`, updating the index and clearing the previous item. There is no brute-force scan through image data for unindexed EXIF, and creating a missing Exif item is unsupported.
-- JPEG XL uses the container's top-level `Exif` box, which is replaced at any size (boxes hold no absolute offsets); a missing box is inserted after `ftyp`. Brotli-compressed (`brob`) Exif boxes cannot be read but are replaced or removed on write. Bare codestreams have no metadata container and are rejected. `strip` removes the box.
-- CR3 metadata must fit in its existing CMT boxes. Image offsets are preserved; adding missing CMT boxes is unsupported. `strip` replaces CMT1–CMT4 with empty TIFF metadata.
-- RAF edits preserve the embedded JPEG and update following CFA offsets when it grows.
-- `setThumbnail` stores a JPEG thumbnail in IFD1, creating it if needed. In TIFF-based files the new thumbnail is appended and the previous one zeroed; an existing IFD1 must already be a JPEG thumbnail (as in CR2 and ARW), otherwise IFD1 is added after a lone IFD0 (as in NEF and DNG). Removal is limited to TIFF and DNG, since RAW readers may locate later IFDs by position. CR3 rejects the write.
+The server must accept `PATCH` requests with `Content-Type: application/octet-stream` and one of these headers:
 
-Removal affects the metadata structures supported by this library; it does not remove unrelated XMP/IPTC or guarantee erasure of historical, unreferenced data left by earlier editors. MakerNotes are opaque bytes, with no vendor-specific decoding or relocation of their internal offsets.
+- `Content-Range: bytes start-end/length` with a body: write the body at `start`, and set the resource's size to `length`.
+- `Content-Range: bytes */length` with an empty body: resize the resource to `length`.
+
+If the server answers `PATCH` with 405, 415 or 501, the handle falls back to a streamed `PUT` of the complete resource. Before the `PUT` it downloads any ranges it doesn't have locally, so bytes you didn't change are kept. Later synchronizations of that handle use `PUT` directly. Any other HTTP error is thrown to the caller. Uploads and response handling use bounded memory.
+
+### Format constraints
+
+- **JPEG:** the EXIF must fit in a single APP1 segment (about 64 KB).
+- **PNG:** the EXIF is stored in an `eXIf` chunk.
+- **TIFF and TIFF-based RAW:** image data stays at its original offsets. Unchanged values stored outside the directories, including MakerNotes, are reused rather than rewritten. The byte order can't be changed, and the file must stay within 32-bit offsets (4 GiB). `strip` removes the EXIF, GPS and interoperability directories and zeros their bytes. It keeps IFD0, thumbnails and image layout tags so the image stays readable.
+- **HEIF, HEIC and AVIF:** only an Exif item that the file already declares can be edited. It is found through its `iloc` entry, including fragmented items and items stored in `idat`. A larger replacement is appended in a new `mdat` box, the index is updated, and the old item is cleared. EXIF that isn't in the index isn't searched for, and a file with no Exif item can't be given one.
+- **JPEG XL:** the EXIF lives in the container's top-level `Exif` box. It can be replaced at any size, because boxes hold no absolute offsets, and it is inserted after `ftyp` if missing. Brotli-compressed (`brob`) Exif boxes can't be read, but they are replaced or removed on write. Bare codestreams have no container to hold metadata and are rejected. `strip` removes the box.
+- **CR3:** the metadata must fit in the existing CMT boxes, and missing boxes can't be added. Image offsets are preserved. `strip` replaces CMT1–CMT4 with empty TIFF metadata.
+- **RAF:** the embedded JPEG is preserved. If it grows, the offsets of the CFA data that follows are updated.
+- **Thumbnails:** `setThumbnail` stores a JPEG thumbnail in IFD1. In TIFF-based files the new thumbnail is appended and the old one zeroed. If the file has an IFD1, it must already hold a JPEG thumbnail (as in CR2 and ARW); if it has only IFD0 (as in NEF and DNG), IFD1 is added after it. Removing a thumbnail works only for TIFF and DNG, because RAW readers may find later IFDs by position. CR3 rejects thumbnail changes.
+
+### Limitations
+
+`strip` removes only the metadata structures described above. It doesn't remove XMP or IPTC, and it doesn't guarantee that old bytes left behind by earlier editors, which the file no longer references, are erased.
+
+MakerNotes are copied as opaque bytes. They aren't decoded, and their internal offsets aren't relocated.
 
 ## Custom storage
 
