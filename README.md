@@ -70,7 +70,6 @@ let metadata = try await EXIFKit.read(from: source, options: options)
 var metadata = try await EXIFKit.read(from: source)
 metadata.setGPSCoordinates(latitude: 38.7223, longitude: -9.1393)
 metadata.ifd0.set(tagID: Tag.artist, value: .ascii("Photographer"))
-try metadata.setThumbnail(thumbnailJPEG) // or nil to remove it
 
 // LocalFileHandle only opens existing files, so create the destination first.
 FileManager.default.createFile(atPath: outputURL.path, contents: nil)
@@ -132,13 +131,71 @@ If the server answers `PATCH` with 405, 415 or 501, the handle falls back to a s
 - **JPEG XL:** the EXIF lives in the container's top-level `Exif` box. It can be replaced at any size, because boxes hold no absolute offsets, and it is inserted after `ftyp` if missing. Brotli-compressed (`brob`) Exif boxes can't be read, but they are replaced or removed on write. Bare codestreams have no container to hold metadata and are rejected. `strip` removes the box.
 - **CR3:** the metadata must fit in the existing CMT boxes, and missing boxes can't be added. Image offsets are preserved. `strip` replaces CMT1–CMT4 with empty TIFF metadata.
 - **RAF:** the embedded JPEG is preserved. If it grows, the offsets of the CFA data that follows are updated.
-- **Thumbnails:** `setThumbnail` stores a JPEG thumbnail in IFD1. In TIFF-based files the new thumbnail is appended and the old one zeroed. If the file has an IFD1, it must already hold a JPEG thumbnail (as in CR2 and ARW); if it has only IFD0 (as in NEF and DNG), IFD1 is added after it. Removing a thumbnail works only for TIFF and DNG, because RAW readers may find later IFDs by position. CR3 rejects thumbnail changes.
+
+Thumbnails have their own constraints; see [Thumbnails](#thumbnails).
 
 ### Limitations
 
 `strip` removes only the metadata structures described above. It doesn't remove XMP or IPTC, and it doesn't guarantee that old bytes left behind by earlier editors, which the file no longer references, are erased.
 
 MakerNotes are copied as opaque bytes. They aren't decoded, and their internal offsets aren't relocated.
+
+## Thumbnails
+
+Many images embed a small JPEG preview, the EXIF thumbnail, in IFD1. EXIFKit gives it to you as JPEG `Data`. `read` doesn't fetch it: `readThumbnail()` reads it from the source when you ask, so keep the source available and unchanged until then. It returns `nil` if the file has no thumbnail. `metadata.thumbnailData` is the same call as an async property.
+
+```swift
+let metadata = try await EXIFKit.read(from: source)
+let jpeg = try await metadata.readThumbnail()
+```
+
+### Showing a thumbnail
+
+The data is a regular JPEG, so `UIImage` can decode it directly:
+
+```swift
+import UIKit
+
+if let jpeg = try await metadata.readThumbnail(),
+   let image = UIImage(data: jpeg) {
+    imageView.image = image
+}
+```
+
+On macOS, use `NSImage(data: jpeg)` instead. In SwiftUI, wrap either one in `Image(uiImage:)` or `Image(nsImage:)`.
+
+### Replacing or removing a thumbnail
+
+`setThumbnail(_:)` takes JPEG data of up to 10 MiB and stores it in IFD1, creating IFD1 if needed. Pass `nil` to remove the thumbnail. Like other edits, the change reaches a file only when you call `write`.
+
+To make a thumbnail from a `UIImage`, scale it down and encode it as JPEG. EXIF thumbnails are conventionally about 160 × 120 pixels:
+
+```swift
+import UIKit
+
+func exifThumbnail(from image: UIImage, maxSide: CGFloat = 160) -> Data? {
+    let scale = min(1, maxSide / max(image.size.width, image.size.height))
+    let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1 // measure the thumbnail in pixels, not points
+    let thumbnail = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+        image.draw(in: CGRect(origin: .zero, size: size))
+    }
+    return thumbnail.jpegData(compressionQuality: 0.8)
+}
+
+var metadata = try await EXIFKit.read(from: source)
+// Check for nil: setThumbnail(nil) would remove the existing thumbnail.
+guard let jpeg = exifThumbnail(from: image) else { return }
+try metadata.setThumbnail(jpeg)
+try await EXIFKit.write(metadata, from: source, to: destination)
+```
+
+### Format constraints for thumbnails
+
+- **JPEG and RAF:** the thumbnail is stored in the same APP1 segment as the rest of the EXIF, so together they must fit in about 64 KB. (RAF metadata lives in an embedded JPEG.)
+- **TIFF and TIFF-based RAW:** the new thumbnail is appended to the file and the old one is zeroed. If the file has an IFD1, it must already hold a JPEG thumbnail (as in CR2 and ARW). If it has only IFD0 (as in NEF and DNG), IFD1 is added after it. Removing a thumbnail works only for TIFF and DNG, because RAW readers may find later IFDs by their position.
+- **CR3:** thumbnail changes are rejected.
 
 ## Custom storage
 
