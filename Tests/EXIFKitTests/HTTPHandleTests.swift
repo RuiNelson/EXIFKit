@@ -125,8 +125,9 @@
                 // Exact reads, so the extraction issues many requests.
                 #expect(try await EXIFKit.read(from: handle, options: ReadOptions(readAheadBytes: 0)).iso == 640)
                 _ = try await handle.read(at: 50000, count: 200_000)
-                #expect(await peers.all.count > 10)
-                #expect(Set(await peers.all).count == 1)
+                let connections = await peers.all
+                #expect(connections.count > 10)
+                #expect(Set(connections).count == 1, "Request peers: \(connections)")
             }
         }
 

@@ -14,6 +14,9 @@ final class HTTPSession: Sendable {
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        // Handle operations are serialized. Queue the next range on the existing HTTP/1.1
+        // connection even if URLSession is still finishing the previous task's callback.
+        config.httpMaximumConnectionsPerHost = 1
         session = URLSession(configuration: config, delegate: router, delegateQueue: nil)
     }
 
