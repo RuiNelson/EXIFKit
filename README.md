@@ -46,7 +46,7 @@ let fromURL = try await EXIFKit.read(from: imageURL)
 
 The parser follows metadata offsets and skips image payloads. It batches adjacent IFD values and maintains a 64 KiB cache per extraction, without prefetching image data. Results retain the source handle for deferred thumbnail reads; keep that source unchanged while using them.
 
-`HTTPFileHandle` discovers the file size with a one-byte range request and uses HTTP `Range` for subsequent reads. It validates `206`, `Content-Range`, body length and resource size. Servers returning the whole file are rejected before their body is buffered. Strong ETags or Last-Modified headers, when provided, are checked on later requests; without validators, a same-sized remote replacement cannot be detected. `HTTPFileHandle` exposes reading only; use `WritableHTTPFileHandle` for writes.
+`HTTPFileHandle` discovers the file size with a one-byte range request and uses HTTP `Range` for subsequent reads. It validates `206`, `Content-Range`, body length and resource size. Servers returning the whole file are rejected before their body is buffered. Strong ETags or Last-Modified headers, when provided, are checked on later requests; without validators, a same-sized remote replacement cannot be detected. Writes are staged on disk and sent by `synchronize()`.
 
 Metadata reads and decoded values are each limited to 32 MiB per extraction, individual values to 10 MiB, and underlying read operations to 4096. The total byte and operation limits are configurable:
 
@@ -60,21 +60,21 @@ let metadata = try await EXIFKit.read(from: source, options: options)
 
 ## Writing and removing metadata
 
-Write to a separate destination implementing `WritableFileHandle`. Unchanged data is copied in blocks of at most 64 KiB; only metadata is assembled in memory. Writing from HTTP therefore transfers the image data needed to produce the output file.
+Write to a separate destination implementing `AbstractFileHandle`. Unchanged data is copied in blocks of at most 64 KiB; only metadata is assembled in memory. Writing from HTTP therefore transfers the image data needed to produce the output file.
 
 ```swift
 var metadata = try await EXIFKit.read(from: source)
 metadata.setGPSCoordinates(latitude: 38.7223, longitude: -9.1393)
 metadata.ifd0.set(tagID: Tag.artist, value: .ascii("Photographer"))
 
-let destination = try WritableLocalFileHandle(url: outputURL)
+let destination = try LocalFileHandle(url: outputURL, createIfNeeded: true)
 try await EXIFKit.write(metadata, from: source, to: destination)
 
-let clean = try WritableLocalFileHandle(url: cleanURL)
+let clean = try LocalFileHandle(url: cleanURL, createIfNeeded: true)
 try await EXIFKit.strip(from: source, to: clean)
 ```
 
-`WritableLocalFileHandle` creates a missing file without immediately truncating an existing one. Pass `createIfNeeded: false` to require an existing file. Each write/strip validates its edit plan before truncating the destination. Source and destination must refer to different underlying storage; identical handles and local files sharing an inode are rejected. Custom wrappers must also respect this requirement. An I/O failure or cancellation can leave a partial destination. To replace an existing file, write to a temporary file and rename it after success.
+`LocalFileHandle(url:createIfNeeded: true)` creates a missing file without truncating an existing one; by default the file must exist. Each write/strip validates its edit plan before truncating the destination. Source and destination must refer to different underlying storage; identical handles and local files sharing an inode are rejected. Custom wrappers must also respect this requirement. An I/O failure or cancellation can leave a partial destination. To replace an existing file, write to a temporary file and rename it after success.
 
 In-memory convenience overloads use the same streaming writer:
 
@@ -87,11 +87,11 @@ let report = EXIFKit.dump(metadata)
 ### HTTP destinations
 
 ```swift
-let destination = try await WritableHTTPFileHandle(url: outputURL)
+let destination = try await HTTPFileHandle(url: outputURL)
 try await EXIFKit.write(metadata, from: source, to: destination)
 ```
 
-The writable HTTP handle stages changes in a sparse temporary file, and downloads untouched ranges only when needed. `synchronize()` sends dirty ranges with PATCH. `EXIFKit.write` and `strip` call it automatically; when using `write` or `truncate` directly, call it after completing your edits. Unsynchronised changes are discarded when the handle is released.
+`HTTPFileHandle` stages changes in a sparse temporary file, and downloads untouched ranges only when needed. `synchronize()` sends dirty ranges with PATCH. `EXIFKit.write` and `strip` call it automatically; when using `write` or `truncate` directly, call it after completing your edits. Unsynchronised changes are discarded when the handle is released.
 
 The server's PATCH contract is `Content-Type: application/octet-stream` with `Content-Range: bytes start-end/length`. It must apply the body at that offset and set the resource to the declared length. An empty PATCH with `Content-Range: bytes */length` resizes it. HTTP 405, 415 or 501 selects a streamed PUT fallback of the complete resource; other HTTP failures are returned to the caller. A fallback preserves untouched bytes by fetching missing ranges first. Later synchronisations reuse PUT when PATCH was rejected. Uploads and response handling have bounded memory use.
 
@@ -113,30 +113,21 @@ Implement the public protocol in [AbstractFileHandle.swift](Sources/EXIFKit/File
 public protocol AbstractFileHandle: AnyObject, Sendable {
     var size: UInt64 { get async throws }
     func read(at offset: UInt64, count: Int) async throws -> Data
-}
-```
-
-Offsets are absolute and reads must return exactly the requested number of bytes, or throw. Zero-byte reads at EOF succeed. Implementations must handle concurrent calls without sharing an unsynchronised cursor and should propagate cancellation. A ZIP-backed or NFS-backed implementation can be passed directly to `EXIFKit.read(from:)`.
-
-For destinations, additionally implement:
-
-```swift
-public protocol WritableFileHandle: AbstractFileHandle {
     func write(_ data: Data, at offset: UInt64) async throws
     func truncate(to size: UInt64) async throws
     func synchronize() async throws
 }
 ```
 
-Writes may extend the destination; truncation sets its exact length. `synchronize()` finishes pending writes and has a default implementation that does nothing for backends with immediately visible writes.
+Offsets are absolute and reads must return exactly the requested number of bytes, or throw. Zero-byte reads at EOF succeed. Implementations must handle concurrent calls without sharing an unsynchronised cursor and should propagate cancellation. Read-only backends throw from `write` and `truncate`. Writes may extend the file; truncation sets its exact length. `synchronize()` finishes pending writes and has a default no-op implementation for backends with immediately visible writes.
 
-| Storage | Read-only source | Writable source/destination |
-|---------|------------------|-----------------------------|
-| Memory | `InMemoryFileHandle` | `WritableInMemoryFileHandle` |
-| Local files | `LocalFileHandle` | `WritableLocalFileHandle` |
-| HTTP | `HTTPFileHandle` | `WritableHTTPFileHandle` |
+| Storage | Handle |
+|---------|--------|
+| Memory | `InMemoryFileHandle` |
+| Local files | `LocalFileHandle` |
+| HTTP | `HTTPFileHandle` |
 
-Read-only types do not conform to `WritableFileHandle`. Mutable memory and local I/O are actor-isolated; writable HTTP serialises complete operations across suspension points. `WritableInMemoryFileHandle.data` is an asynchronous snapshot; the immutable memory handle's `data` is synchronous.
+Mutable memory and local I/O are actor-isolated; HTTP serialises complete operations across suspension points. `InMemoryFileHandle.data` is an asynchronous snapshot.
 
 Native filesystem, URLSession and consumer backend errors propagate unchanged. `FileAccessError` only describes invalid ranges and incomplete reads. EXIF parsing errors and metadata resource limits use `EXIFError`. HTTP response validation uses `URLError.badServerResponse`, preserving the `HTTPURLResponse` in the error's `userInfo["HTTPURLResponse"]`.
 

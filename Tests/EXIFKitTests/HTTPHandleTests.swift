@@ -79,7 +79,7 @@
                 #expect(await log.bytes < 4096)
                 #expect(await log.ranges.count < 30)
                 metadata.ifd0.set(tagID: Tag.make, value: .ascii("HTTP edited"))
-                let destination = WritableInMemoryFileHandle()
+                let destination = InMemoryFileHandle()
                 try await EXIFKit.write(metadata, from: handle, to: destination)
                 #expect(try await EXIFKit.read(from: destination).make == "HTTP edited")
                 #expect(await destination.data.suffix(100_000) == data.suffix(100_000))

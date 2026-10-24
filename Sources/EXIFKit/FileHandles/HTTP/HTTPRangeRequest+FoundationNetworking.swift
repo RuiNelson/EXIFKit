@@ -108,11 +108,15 @@
                     state.continuation?.resume(
                         throwing: FileAccessError.shortRead(expected: count, actual: state.bytes.count)
                     )
-                } else {
-                    let validator = (state.response as? HTTPURLResponse).flatMap(HTTPValidator.init)
+                } else if let response = state.response {
+                    let validator = (response as? HTTPURLResponse).flatMap(HTTPValidator.init)
                     state.continuation?.resume(
-                        returning: HTTPRangeResponse(data: state.bytes, size: state.responseSize, validator: validator)
+                        returning: HTTPRangeResponse(
+                            data: state.bytes, size: state.responseSize, validator: validator, response: response
+                        )
                     )
+                } else {
+                    state.continuation?.resume(throwing: URLError(.badServerResponse))
                 }
             }
         }

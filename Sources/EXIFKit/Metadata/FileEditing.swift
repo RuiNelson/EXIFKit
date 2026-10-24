@@ -26,12 +26,12 @@ struct FileEdit {
 }
 
 extension EXIFKit {
-    /// Stream a modified file to a separate writable destination. Image bytes are copied in 64 KiB blocks.
+    /// Stream a modified file to a separate destination. Image bytes are copied in 64 KiB blocks.
     /// Validation happens before the destination is truncated. I/O failures can leave a partial destination;
     /// use a temporary file and rename it after success when replacing an existing file.
     public static func write(
         _ structure: TIFFStructure, from source: any AbstractFileHandle,
-        to destination: any WritableFileHandle, format: ImageFormat? = nil,
+        to destination: any AbstractFileHandle, format: ImageFormat? = nil,
         options: ReadOptions = ReadOptions()
     ) async throws {
         try await edit(structure, stripping: false, from: source, to: destination, format: format, options: options)
@@ -39,7 +39,7 @@ extension EXIFKit {
 
     /// Stream a file with EXIF removed to a separate destination.
     public static func strip(
-        from source: any AbstractFileHandle, to destination: any WritableFileHandle,
+        from source: any AbstractFileHandle, to destination: any AbstractFileHandle,
         format: ImageFormat? = nil, options: ReadOptions = ReadOptions()
     ) async throws {
         try await edit(nil, stripping: true, from: source, to: destination, format: format, options: options)
@@ -47,7 +47,7 @@ extension EXIFKit {
 
     private static func edit(
         _ structure: TIFFStructure?, stripping: Bool, from source: any AbstractFileHandle,
-        to destination: any WritableFileHandle, format: ImageFormat?, options: ReadOptions
+        to destination: any AbstractFileHandle, format: ImageFormat?, options: ReadOptions
     ) async throws {
         guard source !== destination else {
             throw EXIFError.writeFailed("Source and destination refer to the same file")
@@ -73,7 +73,7 @@ extension EXIFKit {
 
     private static func stream(
         _ source: any AbstractFileHandle, size: UInt64,
-        edits: [FileEdit], to destination: any WritableFileHandle
+        edits: [FileEdit], to destination: any AbstractFileHandle
     ) async throws {
         let edits = edits.sorted { $0.range.lowerBound < $1.range.lowerBound }
         var checked: UInt64 = 0

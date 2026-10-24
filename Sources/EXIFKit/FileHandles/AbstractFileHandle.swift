@@ -1,23 +1,18 @@
 import Foundation
 
-/// A random-access byte source. Offsets are absolute, reads return exactly `count` bytes.
-/// Implementations must support concurrent calls without sharing a mutable cursor.
-/// Keep the source unchanged while an operation (or a lazy thumbnail read) is in progress.
+/// A random-access byte handle. Offsets are absolute and reads return exactly `count` bytes.
+/// Implementations must support concurrent calls without sharing an unsynchronised cursor.
+/// Keep the handle unchanged while an extraction or a lazy thumbnail read is in progress.
 public protocol AbstractFileHandle: AnyObject, Sendable {
     var size: UInt64 { get async throws }
     func read(at offset: UInt64, count: Int) async throws -> Data
-}
-
-/// A random-access destination. Writing beyond EOF extends it; truncation sets its exact size.
-/// EXIFKit writes to a separate destination, which must not alias the source.
-public protocol WritableFileHandle: AbstractFileHandle {
     func write(_ data: Data, at offset: UInt64) async throws
     func truncate(to size: UInt64) async throws
     /// Finish pending writes. EXIFKit calls this after producing the complete destination.
     func synchronize() async throws
 }
 
-public extension WritableFileHandle {
+public extension AbstractFileHandle {
     func synchronize() async throws {
         ()
     }

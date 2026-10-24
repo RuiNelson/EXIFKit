@@ -40,6 +40,14 @@ actor SparseFile: AbstractFileHandle {
         return result
     }
 
+    func write(_: Data, at _: UInt64) async throws {
+        throw EXIFError.writeFailed("Sparse source is read-only")
+    }
+
+    func truncate(to _: UInt64) async throws {
+        throw EXIFError.writeFailed("Sparse source is read-only")
+    }
+
     var transferred: Int {
         reads.reduce(0) { $0 + Int($1.count) }
     }
@@ -166,7 +174,7 @@ struct HandleTests {
 
     @Test func memoryAndLocalHandleRanges() async throws {
         let data = Data([0, 1, 2, 3, 4])
-        let memory = WritableInMemoryFileHandle(data: data)
+        let memory = InMemoryFileHandle(data: data)
         #expect(try await memory.read(at: 2, count: 2) == Data([2, 3]))
         await #expect(throws: FileAccessError.self) { try await memory.read(at: UInt64.max, count: 1) }
         await #expect(throws: FileAccessError.self) { try await memory.read(at: 0, count: -1) }
@@ -177,12 +185,10 @@ struct HandleTests {
         #expect(await memory.data == Data([0, 1, 2]))
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: url) }
-        let local = try WritableLocalFileHandle(url: url)
+        let local = try LocalFileHandle(url: url, createIfNeeded: true)
         try await local.write(data, at: 0)
         #expect(try await local.read(at: 2, count: 2) == Data([2, 3]))
         let readOnly = try LocalFileHandle(url: url)
-        let source: any AbstractFileHandle = readOnly
-        #expect(!(source is any WritableFileHandle))
         await #expect(throws: EXIFError.self) { try await EXIFKit.strip(from: readOnly, to: local) }
         try await withThrowingTaskGroup(of: Void.self) { group in
             for index in 0 ..< 100 {
@@ -217,12 +223,12 @@ struct HandleTests {
             #expect(parsed.iso == 640, "\(format)")
             #expect(abs((parsed.latitude ?? 0) - 38.7223) < 0.0001)
             parsed.ifd0.set(tagID: Tag.make, value: .ascii("Changed"))
-            let output = WritableInMemoryFileHandle(data: Data(count: bytes.count * 2))
+            let output = InMemoryFileHandle(data: Data(count: bytes.count * 2))
             try await EXIFKit.write(parsed, from: source, to: output, format: format)
             let rewritten = try await EXIFKit.read(from: output, format: format)
             #expect(rewritten.make == "Changed", "\(format)")
             #expect(rewritten.iso == 640, "\(format)")
-            let stripped = WritableInMemoryFileHandle()
+            let stripped = InMemoryFileHandle()
             try await EXIFKit.strip(from: output, to: stripped, format: format)
             switch format {
             case .jpeg, .png, .heif, .raf:
@@ -267,7 +273,7 @@ struct HandleTests {
             var metadata = try await EXIFKit.read(from: source)
             #expect(metadata.iso == 640)
             metadata.ifd0.set(tagID: Tag.make, value: .ascii("X"))
-            let output = WritableInMemoryFileHandle()
+            let output = InMemoryFileHandle()
             try await EXIFKit.write(metadata, from: source, to: output)
             #expect(try await EXIFKit.read(from: output).make == "X")
         }
@@ -281,9 +287,9 @@ struct HandleTests {
         var corrupt = tiff
         corrupt.replaceSubrange(4 ..< 8, with: [255, 255, 255, 255])
         await #expect(throws: (any Error).self) { try await EXIFKit.read(from: corrupt) }
-        let same = WritableInMemoryFileHandle(data: tiff)
+        let same = InMemoryFileHandle(data: tiff)
         await #expect(throws: EXIFError.self) { try await EXIFKit.strip(from: same, to: same) }
-        let destination = WritableInMemoryFileHandle(data: Data("keep".utf8))
+        let destination = InMemoryFileHandle(data: Data("keep".utf8))
         await #expect(throws: (any Error).self) {
             try await EXIFKit.write(Self.metadata(), from: InMemoryFileHandle(data: corrupt), to: destination)
         }
@@ -293,7 +299,7 @@ struct HandleTests {
     @Test func insertionAndBoundedStreamingCopy() async throws {
         for (format, bytes) in [(ImageFormat.jpeg, Self.jpeg()), (.png, Self.png())] {
             let source = SparseFile(size: UInt64(bytes.count), regions: [(0, bytes)])
-            let destination = WritableInMemoryFileHandle()
+            let destination = InMemoryFileHandle()
             try await EXIFKit.write(Self.metadata(), from: source, to: destination, format: format)
             #expect(try await EXIFKit.read(from: destination).iso == 640)
             #expect(await source.reads.allSatisfy { $0.count <= 65536 })
@@ -362,14 +368,14 @@ extension HandleTests {
             let source = InMemoryFileHandle(data: original)
             var metadata = try await EXIFKit.read(from: source)
             metadata.ifd0.set(tagID: Tag.imageDescription, value: .ascii(String(repeating: "x", count: 5000)))
-            let destination = WritableInMemoryFileHandle()
+            let destination = InMemoryFileHandle()
             try await EXIFKit.write(metadata, from: source, to: destination)
             let parsed = try await EXIFKit.read(from: destination)
             #expect(parsed.imageDescription?.count == 5000)
             #expect(parsed.iso == 640)
-            let stripped = WritableInMemoryFileHandle()
+            let stripped = InMemoryFileHandle()
             try await EXIFKit.strip(from: destination, to: stripped)
-            let twice = WritableInMemoryFileHandle()
+            let twice = InMemoryFileHandle()
             try await EXIFKit.strip(from: stripped, to: twice)
             #expect(await twice.data == stripped.data)
         }
@@ -404,6 +410,14 @@ extension HandleTests {
                 }
                 return data.subdata(in: Int(offset) ..< Int(offset) + count)
             }
+
+            func write(_: Data, at _: UInt64) async throws {
+                throw CocoaError(.fileWriteUnknown)
+            }
+
+            func truncate(to _: UInt64) async throws {
+                throw CocoaError(.fileWriteUnknown)
+            }
         }
         await #expect(throws: CocoaError.self) { try await EXIFKit.read(from: Failing()) }
         await #expect(throws: EXIFError.self) {
@@ -421,7 +435,7 @@ extension HandleTests {
     @Test func localSparseEightGigabyteFile() async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".tiff")
         defer { try? FileManager.default.removeItem(at: url) }
-        let local = try WritableLocalFileHandle(url: url)
+        let local = try LocalFileHandle(url: url, createIfNeeded: true)
         try await local.write(TIFFSerializer.encode(Self.metadata()), at: 0)
         try await local.truncate(to: 8 * 1024 * 1024 * 1024)
         let metadata = try await EXIFKit.read(from: url)
@@ -453,7 +467,7 @@ extension HandleTests {
 extension HandleTests {
     @Test func outputSizeOverflowPreservesDestination() async throws {
         let source = SparseFile(size: UInt64.max, regions: [(0, Self.jpeg())])
-        let destination = WritableInMemoryFileHandle(data: Data("keep".utf8))
+        let destination = InMemoryFileHandle(data: Data("keep".utf8))
         await #expect(throws: EXIFError.self) {
             try await EXIFKit.write(Self.metadata(), from: source, to: destination, format: .jpeg)
         }
@@ -484,7 +498,7 @@ extension HandleTests {
             #expect(actual.userInfo[NSFilePathErrorKey] as? String == expected.userInfo[NSFilePathErrorKey] as? String)
         }
         struct BackendError: Error, Equatable { let operation: String }
-        actor Backend: WritableFileHandle {
+        actor Backend: AbstractFileHandle {
             let failingOperation: String
             init(_ failingOperation: String = "read") {
                 self.failingOperation = failingOperation

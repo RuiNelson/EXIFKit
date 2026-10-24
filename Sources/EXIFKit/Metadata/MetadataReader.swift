@@ -60,6 +60,14 @@ final class FileRegion: AbstractFileHandle, Sendable {
         return result
     }
 
+    func write(_: Data, at _: UInt64) async throws {
+        throw EXIFError.writeFailed("Cannot write through a logical file region")
+    }
+
+    func truncate(to _: UInt64) async throws {
+        throw EXIFError.writeFailed("Cannot truncate a logical file region")
+    }
+
     func reserveMetadata(_ count: Int) async throws {
         if let reader = source as? MetadataReader {
             try await reader.reserveMetadata(count)
@@ -130,6 +138,14 @@ actor MetadataReader: AbstractFileHandle {
             cacheSize += count
         }
         return data
+    }
+
+    func write(_: Data, at _: UInt64) async throws {
+        throw EXIFError.writeFailed("Cannot write through a metadata reader")
+    }
+
+    func truncate(to _: UInt64) async throws {
+        throw EXIFError.writeFailed("Cannot truncate a metadata reader")
     }
 }
 

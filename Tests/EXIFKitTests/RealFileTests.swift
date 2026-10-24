@@ -20,6 +20,14 @@ private actor MeasuredLocalFile: AbstractFileHandle {
         transferred += bytes.count
         return bytes
     }
+
+    func write(_ data: Data, at offset: UInt64) async throws {
+        try await source.write(data, at: offset)
+    }
+
+    func truncate(to size: UInt64) async throws {
+        try await source.truncate(to: size)
+    }
 }
 
 struct RealFileTests {

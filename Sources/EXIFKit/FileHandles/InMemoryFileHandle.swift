@@ -1,26 +1,10 @@
 import Foundation
 
-/// An immutable byte source. Use WritableInMemoryFileHandle when mutations are required.
-public final class InMemoryFileHandle: AbstractFileHandle, Sendable {
-    public let data: Data
-    public var size: UInt64 {
-        get async throws { UInt64(data.count) }
-    }
-
-    public init(data: Data) {
-        self.data = Data(data)
-    }
-
-    public func read(at offset: UInt64, count: Int) async throws -> Data {
-        try Task.checkCancellation()
-        try validateRange(offset, count, size: UInt64(data.count))
-        return data.subdata(in: Int(offset) ..< Int(offset) + count)
-    }
-}
-
-/// Mutable memory isolated by an actor. `data` returns a snapshot of the current contents.
-public actor WritableInMemoryFileHandle: WritableFileHandle {
+/// A mutable in-memory random-access handle.
+public actor InMemoryFileHandle: AbstractFileHandle {
     private var storage: Data
+
+    /// A snapshot of the current contents.
     public var data: Data {
         storage
     }
@@ -41,9 +25,7 @@ public actor WritableInMemoryFileHandle: WritableFileHandle {
 
     public func write(_ data: Data, at offset: UInt64) async throws {
         try Task.checkCancellation()
-        if data.isEmpty {
-            return
-        }
+        guard !data.isEmpty else { return }
         guard offset <= UInt64(Int.max), UInt64(data.count) <= UInt64(Int.max) - offset else {
             throw FileAccessError.invalidRange(offset: offset, count: data.count, size: UInt64(storage.count))
         }

@@ -126,7 +126,7 @@ struct Exiv2OracleTests {
         metadata.ifd0.set(tagID: Tag.artist, value: .ascii("EXIFKit oracle test"))
         metadata.exifIFD?.set(tagID: Tag.isoSpeedRatings, value: .short(800))
         metadata.setGPSCoordinates(latitude: 38.7223, longitude: -9.1393, altitude: 12.5)
-        try await EXIFKit.write(metadata, from: source, to: WritableLocalFileHandle(url: output))
+        try await EXIFKit.write(metadata, from: source, to: LocalFileHandle(url: output, createIfNeeded: true))
         let live = try await Exiv2.tags(output)
         let reparsed = try await EXIFKit.read(from: output)
         try EXIFOracleTag.assertMatches(reparsed, tags: live)
@@ -146,7 +146,7 @@ struct Exiv2OracleTests {
         let fixture = try NikonFixture.url()
         let output = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".jpg")
         defer { try? FileManager.default.removeItem(at: output) }
-        try await EXIFKit.strip(from: LocalFileHandle(url: fixture), to: WritableLocalFileHandle(url: output))
+        try await EXIFKit.strip(from: LocalFileHandle(url: fixture), to: LocalFileHandle(url: output, createIfNeeded: true))
         #expect(try await Exiv2.tags(output).isEmpty)
         await #expect(throws: EXIFError.self) { try await EXIFKit.read(from: output) }
         try await Exiv2.assertImageAndNonEXIFSegmentsPreserved(fixture, output)

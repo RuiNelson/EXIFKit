@@ -175,13 +175,13 @@ public enum EXIFKit {
         _ structure: TIFFStructure, to data: Data,
         format: ImageFormat? = nil
     ) async throws -> Data {
-        let destination = WritableInMemoryFileHandle()
+        let destination = InMemoryFileHandle()
         try await write(structure, from: InMemoryFileHandle(data: data), to: destination, format: format)
         return await destination.data
     }
 
     public static func strip(from data: Data, format: ImageFormat? = nil) async throws -> Data {
-        let destination = WritableInMemoryFileHandle()
+        let destination = InMemoryFileHandle()
         try await strip(from: InMemoryFileHandle(data: data), to: destination, format: format)
         return await destination.data
     }

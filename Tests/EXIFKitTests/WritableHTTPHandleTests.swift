@@ -113,13 +113,13 @@
             }
         }
 
-        @Test func readOnlyTypesExposeNoWriteCapability() async throws {
+        @Test func allStandardHandlesShareMutationCapability() async throws {
             guard #available(macOS 14, iOS 17, tvOS 17, *) else { return }
             let memory: any AbstractFileHandle = InMemoryFileHandle(data: Data())
-            #expect(!(memory is any WritableFileHandle))
+            try await memory.truncate(to: 1)
             try await server(initial: Data([1, 2, 3])) { url, _ in
                 let http: any AbstractFileHandle = try await HTTPFileHandle(url: url)
-                #expect(!(http is any WritableFileHandle))
+                try await http.write(Data([4]), at: 3)
             }
         }
 
@@ -127,7 +127,7 @@
             guard #available(macOS 14, iOS 17, tvOS 17, *) else { return }
             let original = Data(repeating: 0xA5, count: 100_000)
             try await server(initial: original) { url, state in
-                let handle = try await WritableHTTPFileHandle(url: url)
+                let handle = try await HTTPFileHandle(url: url)
                 try await handle.write(Data([1, 2, 3]), at: 123)
                 #expect(await state.writes.isEmpty)
                 #expect(try await handle.read(at: 123, count: 3) == Data([1, 2, 3]))
@@ -150,7 +150,7 @@
             let original = Data(repeating: 0xA5, count: 100_000)
             for status in [405, 415, 501] {
                 try await server(initial: original, patchStatus: status) { url, state in
-                    let handle = try await WritableHTTPFileHandle(url: url)
+                    let handle = try await HTTPFileHandle(url: url)
                     try await handle.write(Data([1, 2, 3]), at: 123)
                     try await handle.synchronize()
                     var expected = original
@@ -171,7 +171,7 @@
             let original = HandleTests.jpeg(TIFFSerializer.encode(HandleTests.metadata()))
             for status: Int? in [nil, 405] {
                 try await server(initial: nil, patchStatus: status) { url, state in
-                    let destination = try await WritableHTTPFileHandle(url: url)
+                    let destination = try await HTTPFileHandle(url: url)
                     let source = InMemoryFileHandle(data: original)
                     var metadata = try await EXIFKit.read(from: source)
                     metadata.ifd0.set(tagID: Tag.artist, value: .ascii("Remote writer"))
@@ -188,7 +188,7 @@
         @Test func resizingAndConcurrentWritesAreSerialized() async throws {
             guard #available(macOS 14, iOS 17, tvOS 17, *) else { return }
             try await server(initial: Data([0, 1, 2, 3, 4, 5])) { url, state in
-                let handle = try await WritableHTTPFileHandle(url: url)
+                let handle = try await HTTPFileHandle(url: url)
                 try await handle.truncate(to: 3)
                 try await handle.synchronize()
                 #expect(await state.data == Data([0, 1, 2]))
@@ -209,7 +209,7 @@
         @Test func HTTPFailureIsPreservedAndDoesNotTriggerPUT() async throws {
             guard #available(macOS 14, iOS 17, tvOS 17, *) else { return }
             try await server(initial: Data([0, 1, 2]), patchStatus: 403) { url, state in
-                let handle = try await WritableHTTPFileHandle(url: url)
+                let handle = try await HTTPFileHandle(url: url)
                 try await handle.write(Data([9]), at: 0)
                 do {
                     try await handle.synchronize()
@@ -229,19 +229,19 @@
         @Test func newEmptyResourceAndEmptyWrites() async throws {
             guard #available(macOS 14, iOS 17, tvOS 17, *) else { return }
             try await server(initial: nil) { url, state in
-                let handle = try await WritableHTTPFileHandle(url: url)
+                let handle = try await HTTPFileHandle(url: url)
                 try await handle.write(Data(), at: 1000)
                 #expect(try await handle.size == 0)
                 try await handle.synchronize()
                 #expect(await state.data == Data())
                 #expect(await state.writes.first?.range == "bytes */0")
             }
-            let memory = WritableInMemoryFileHandle(data: Data([1, 2]))
+            let memory = InMemoryFileHandle(data: Data([1, 2]))
             try await memory.write(Data(), at: UInt64.max)
             #expect(await memory.data == Data([1, 2]))
             let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: fileURL) }
-            let file = try WritableLocalFileHandle(url: fileURL)
+            let file = try LocalFileHandle(url: fileURL, createIfNeeded: true)
             try await file.write(Data(), at: UInt64.max)
             #expect(try await file.size == 0)
         }
@@ -250,7 +250,7 @@
             guard #available(macOS 14, iOS 17, tvOS 17, *) else { return }
             let bytes = HandleTests.jpeg(TIFFSerializer.encode(HandleTests.metadata())) + Data(count: 2 * 1024 * 1024)
             try await server(initial: bytes) { url, state in
-                let handle = try await WritableHTTPFileHandle(url: url)
+                let handle = try await HTTPFileHandle(url: url)
                 #expect(try await EXIFKit.read(from: handle).iso == 640)
                 #expect(await state.downloaded < 4096)
                 let task = Task {
