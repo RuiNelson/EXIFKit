@@ -95,7 +95,7 @@ struct RAWThumbnailTests {
         header.offset = 4
         var allowed = try [tableRange(original, at: header.readUInt32(), order: order)]
         if let ifd1 = metadata.ifd1 {
-            allowed.append(try tableRange(original, at: metadata.ifd0.nextIFDOffset, order: order))
+            try allowed.append(tableRange(original, at: metadata.ifd0.nextIFDOffset, order: order))
             let offset = try #require(ifd1.value(for: Tag.jpegInterchangeFormat)?.uint32Value)
             let length = try #require(ifd1.value(for: Tag.jpegInterchangeFormatLength)?.uint32Value)
             allowed.append(Int(offset) ..< Int(offset + length))

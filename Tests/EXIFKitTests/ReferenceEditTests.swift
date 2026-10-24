@@ -3,50 +3,50 @@ import Foundation
 import Testing
 
 private enum Segments {
-        /// JPEG scan bytes and all non-EXIF segments must remain identical, including XMP/IPTC.
-        static func preservedRanges(_ file: LocalFileHandle) async throws -> [Range<UInt64>] {
-            let size = try await file.size
-            #expect(try await file.read(at: 0, count: 2) == Data([0xFF, 0xD8]))
-            var ranges: [Range<UInt64>] = [0 ..< 2]
-            var position: UInt64 = 2
-            while position < size {
-                let start = position
-                let marker = try await file.read(at: position, count: 2)
-                #expect(marker[0] == 0xFF)
-                if marker[1] == 0xDA {
-                    ranges.append(start ..< size); return ranges
-                }
-                let lengthBytes = try await file.read(at: position + 2, count: 2)
-                let length = UInt64(lengthBytes[0]) << 8 | UInt64(lengthBytes[1])
-                #expect(length >= 2)
-                position += 2 + length
-                if marker[1] == 0xE1, length >= 8,
-                   try await file.read(at: start + 4, count: 6) == Data("Exif\0\0".utf8)
-                {
-                    continue
-                }
-                ranges.append(start ..< position)
+    /// JPEG scan bytes and all non-EXIF segments must remain identical, including XMP/IPTC.
+    static func preservedRanges(_ file: LocalFileHandle) async throws -> [Range<UInt64>] {
+        let size = try await file.size
+        #expect(try await file.read(at: 0, count: 2) == Data([0xFF, 0xD8]))
+        var ranges: [Range<UInt64>] = [0 ..< 2]
+        var position: UInt64 = 2
+        while position < size {
+            let start = position
+            let marker = try await file.read(at: position, count: 2)
+            #expect(marker[0] == 0xFF)
+            if marker[1] == 0xDA {
+                ranges.append(start ..< size); return ranges
             }
-            Issue.record("JPEG scan not found")
-            return ranges
+            let lengthBytes = try await file.read(at: position + 2, count: 2)
+            let length = UInt64(lengthBytes[0]) << 8 | UInt64(lengthBytes[1])
+            #expect(length >= 2)
+            position += 2 + length
+            if marker[1] == 0xE1, length >= 8,
+               try await file.read(at: start + 4, count: 6) == Data("Exif\0\0".utf8)
+            {
+                continue
+            }
+            ranges.append(start ..< position)
         }
+        Issue.record("JPEG scan not found")
+        return ranges
+    }
 
-        static func assertImageAndNonEXIFSegmentsPreserved(_ original: URL, _ output: URL) async throws {
-            let lhs = try LocalFileHandle(url: original), rhs = try LocalFileHandle(url: output)
-            let left = try await preservedRanges(lhs), right = try await preservedRanges(rhs)
-            #expect(left.count == right.count)
-            for (a, b) in zip(left, right) {
-                let length = a.upperBound - a.lowerBound
-                #expect(length == b.upperBound - b.lowerBound)
-                var offset: UInt64 = 0
-                while offset < length {
-                    let count = Int(min(65536, length - offset))
-                    let expected = try await lhs.read(at: a.lowerBound + offset, count: count)
-                    #expect(try await rhs.read(at: b.lowerBound + offset, count: count) == expected)
-                    offset += UInt64(count)
-                }
+    static func assertImageAndNonEXIFSegmentsPreserved(_ original: URL, _ output: URL) async throws {
+        let lhs = try LocalFileHandle(url: original), rhs = try LocalFileHandle(url: output)
+        let left = try await preservedRanges(lhs), right = try await preservedRanges(rhs)
+        #expect(left.count == right.count)
+        for (a, b) in zip(left, right) {
+            let length = a.upperBound - a.lowerBound
+            #expect(length == b.upperBound - b.lowerBound)
+            var offset: UInt64 = 0
+            while offset < length {
+                let count = Int(min(65536, length - offset))
+                let expected = try await lhs.read(at: a.lowerBound + offset, count: count)
+                #expect(try await rhs.read(at: b.lowerBound + offset, count: count) == expected)
+                offset += UInt64(count)
             }
         }
+    }
 }
 
 struct ReferenceEditTests {

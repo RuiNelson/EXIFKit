@@ -2,9 +2,9 @@ import Foundation
 
 // MARK: - Thumbnail
 
-extension TIFFStructure {
+public extension TIFFStructure {
     /// Fetch only the embedded JPEG thumbnail. The source must remain unchanged.
-    public func readThumbnail() async throws -> Data? {
+    func readThumbnail() async throws -> Data? {
         if let loadedThumbnail {
             return loadedThumbnail
         }
@@ -17,7 +17,7 @@ extension TIFFStructure {
         return try await sourceRegion.read(at: UInt64(offset), count: Int(length))
     }
 
-    func preparingForWrite() async throws -> TIFFStructure {
+    internal func preparingForWrite() async throws -> TIFFStructure {
         var copy = self
         copy.loadedThumbnail = try await readThumbnail()
         return copy
@@ -28,7 +28,7 @@ extension TIFFStructure {
     /// Most JPEG files contain a small JPEG thumbnail in IFD1.
     /// The thumbnail data is referenced by JPEGInterchangeFormat (offset)
     /// and JPEGInterchangeFormatLength (size) tags.
-    public var thumbnailData: Data? {
+    var thumbnailData: Data? {
         get async throws { try await readThumbnail() }
     }
 
@@ -37,7 +37,7 @@ extension TIFFStructure {
     /// A missing IFD1 is created with JPEG compression and 72 dpi resolution.
     /// In TIFF-based files the write replaces an IFD1 JPEG thumbnail, or adds IFD1 after a lone IFD0;
     /// any other IFD1 is rejected, and only TIFF and DNG thumbnails can be removed. CR3 rejects the write.
-    public mutating func setThumbnail(_ jpeg: Data?) throws {
+    mutating func setThumbnail(_ jpeg: Data?) throws {
         if let jpeg {
             guard jpeg.count >= 4, jpeg.prefix(2) == Data([0xFF, 0xD8]) else {
                 throw EXIFError.invalidJPEG("Thumbnail must be a JPEG image")
