@@ -40,7 +40,7 @@ struct JXLTests {
     @Test func extractsEmbeddedThumbnail() async throws {
         let metadata = try await EXIFKit.read(from: NikonFixture.url("Houses", extension: "jxl"))
         let thumbnail = try #require(await metadata.readThumbnail())
-        #expect(thumbnail.count == 11450) // exiftool: ThumbnailLength
+        #expect(thumbnail.count == 11450) // ThumbnailLength as reported by exiftool when the reference was extracted
         #expect(thumbnail.prefix(2) == Data([0xFF, 0xD8]))
         #expect(thumbnail.suffix(2) == Data([0xFF, 0xD9]))
     }
