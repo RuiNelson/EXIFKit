@@ -29,26 +29,6 @@ public struct TIFFStructure: Sendable {
     /// Interoperability metadata, read without retaining the TIFF source buffer.
     public var interopIFD: IFD?
 
-    /// Fetch only the embedded JPEG thumbnail. The source must remain unchanged.
-    public func readThumbnail() async throws -> Data? {
-        if let loadedThumbnail {
-            return loadedThumbnail
-        }
-        guard let sourceRegion,
-              let offset = ifd1?.value(for: Tag.jpegInterchangeFormat)?.uint32Value,
-              let length = ifd1?.value(for: Tag.jpegInterchangeFormatLength)?.uint32Value,
-              length > 0
-        else { return nil }
-        guard length <= 10 * 1024 * 1024 else { throw EXIFError.resourceLimitExceeded }
-        return try await sourceRegion.read(at: UInt64(offset), count: Int(length))
-    }
-
-    func preparingForWrite() async throws -> TIFFStructure {
-        var copy = self
-        copy.loadedThumbnail = try await readThumbnail()
-        return copy
-    }
-
     public init(
         byteOrder: ByteOrder,
         ifd0: IFD = IFD(),
@@ -192,49 +172,6 @@ public struct TIFFStructure: Sendable {
     /// Pixel height from EXIF
     public var pixelHeight: UInt32? {
         exifIFD?.value(for: Tag.pixelYDimension)?.uint32Value
-    }
-
-    // MARK: - Thumbnail Extraction
-
-    /// Extract the embedded JPEG thumbnail from IFD1, if present.
-    ///
-    /// Most JPEG files contain a small JPEG thumbnail in IFD1.
-    /// The thumbnail data is referenced by JPEGInterchangeFormat (offset)
-    /// and JPEGInterchangeFormatLength (size) tags.
-    public var thumbnailData: Data? {
-        get async throws { try await readThumbnail() }
-    }
-
-    /// Replace the embedded JPEG thumbnail in IFD1, or remove it (and IFD1) with `nil`.
-    ///
-    /// A missing IFD1 is created with JPEG compression and 72 dpi resolution.
-    /// In TIFF-based files the write replaces an IFD1 JPEG thumbnail, or adds IFD1 after a lone IFD0;
-    /// any other IFD1 is rejected, and only TIFF and DNG thumbnails can be removed. CR3 rejects the write.
-    public mutating func setThumbnail(_ jpeg: Data?) throws {
-        if let jpeg {
-            guard jpeg.count >= 4, jpeg.prefix(2) == Data([0xFF, 0xD8]) else {
-                throw EXIFError.invalidJPEG("Thumbnail must be a JPEG image")
-            }
-            guard jpeg.count <= 10 * 1024 * 1024 else { throw EXIFError.resourceLimitExceeded }
-            var directory = ifd1 ?? IFD()
-            if ifd1 == nil {
-                directory.set(tagID: Tag.xResolution, value: .rational(URational(numerator: 72, denominator: 1)))
-                directory.set(tagID: Tag.yResolution, value: .rational(URational(numerator: 72, denominator: 1)))
-                directory.set(tagID: Tag.resolutionUnit, value: .short(2))
-            }
-            // An uncompressed strip thumbnail would point at image data that is no longer written.
-            for tag in [Tag.stripOffsets, Tag.rowsPerStrip, Tag.stripByteCounts] {
-                directory.remove(tagID: tag)
-            }
-            directory.set(tagID: Tag.compression, value: .short(6))
-            directory.set(tagID: Tag.jpegInterchangeFormatLength, value: .long(UInt32(jpeg.count)))
-            ifd1 = directory
-        } else {
-            ifd1 = nil
-        }
-        loadedThumbnail = jpeg
-        sourceRegion = nil
-        thumbnailEdited = true
     }
 
     /// GPS latitude as a signed decimal degree (negative = South)

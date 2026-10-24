@@ -114,46 +114,19 @@ extension EditPlanner {
         }
         ifd0.nextIFDOffset = original.ifd0.nextIFDOffset
         if updated.thumbnailEdited {
-            // Only an EXIF-style IFD1 (or none) can be replaced: other chained IFDs are pages or RAW data.
-            let previous = original.ifd1
-            let previousRange = previous.flatMap { ifd -> Range<UInt64>? in
-                guard let offset = ifd.value(for: Tag.jpegInterchangeFormat)?.uint32Value,
-                      let length = ifd.value(for: Tag.jpegInterchangeFormatLength)?.uint32Value else { return nil }
-                return UInt64(offset) ..< UInt64(offset) + UInt64(length)
-            }
-            guard previous == nil || previousRange != nil else {
-                throw EXIFError.writeFailed("IFD1 is not a JPEG thumbnail")
-            }
-            if let jpeg = updated.loadedThumbnail, var directory = updated.ifd1 {
+            func append(_ bytes: Data) -> UInt64 {
                 let start = appendStart + UInt64(appended.count)
-                guard start + UInt64(jpeg.count) <= UInt64(UInt32.max) else {
-                    throw EXIFError.writeFailed("Classic TIFF thumbnail offset exceeds 32 bits")
-                }
-                appended.append(jpeg)
-                if jpeg.count % 2 == 1 {
+                appended.append(bytes)
+                if bytes.count % 2 == 1 {
                     appended.append(0)
                 }
-                directory.set(tagID: Tag.jpegInterchangeFormat, value: .long(UInt32(start)))
-                directory.set(tagID: Tag.jpegInterchangeFormatLength, value: .long(UInt32(jpeg.count)))
-                directory.nextIFDOffset = previous?.nextIFDOffset ?? 0
-                ifd0.nextIFDOffset = try await place(
-                    directory, previous: previous, at: previous == nil ? nil : original.ifd0.nextIFDOffset
-                )
-            } else if previous != nil {
-                // RAW readers may locate later IFDs by their position in the chain.
-                guard !raw else { throw EXIFError.writeFailed("Removing the thumbnail of a RAW file is unsupported") }
-                ifd0.nextIFDOffset = previous?.nextIFDOffset ?? 0
+                return start
             }
-            // Erase the superseded thumbnail, unless the main JPEG preview shares its bytes.
-            let preview = original.ifd0.value(for: Tag.jpegInterchangeFormat)?.uint32Value.map { offset in
-                UInt64(offset) ..< UInt64(offset)
-                    + UInt64(original.ifd0.value(for: Tag.jpegInterchangeFormatLength)?.uint32Value ?? 0)
-            }
-            if let range = previousRange, !range.isEmpty, range.upperBound <= file.length,
-               !(preview?.overlaps(range) ?? false)
-            {
-                edits.append(FileEdit(range, pieces: [.zeros(range.upperBound - range.lowerBound)]))
-            }
+            let thumbnail = try await tiffThumbnail(
+                updated, original: original, raw: raw, fileLength: file.length, append: append, place: place
+            )
+            ifd0.nextIFDOffset = thumbnail.nextIFDOffset
+            edits += thumbnail.edits
         }
         for (tag, directory, oldDirectory) in [
             (Tag.exifIFDPointer, exif, original.exifIFD), (Tag.gpsIFDPointer, updated.gpsIFD, original.gpsIFD),
