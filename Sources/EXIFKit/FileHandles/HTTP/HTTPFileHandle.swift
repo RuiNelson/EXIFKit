@@ -40,7 +40,8 @@ public actor HTTPFileHandle: AbstractFileHandle {
             resourceExists = false
         }
         stagingURL = FileManager.default.temporaryDirectory.appendingPathComponent("EXIFKit-\(UUID().uuidString)")
-        staging = try LocalFileHandle(url: stagingURL, createIfNeeded: true)
+        try Data().write(to: stagingURL)
+        staging = try LocalFileHandle(url: stagingURL)
         try await staging.truncate(to: length)
     }
 
@@ -195,7 +196,8 @@ public actor HTTPFileHandle: AbstractFileHandle {
             }
         }
         if temporary {
-            let body = try LocalFileHandle(url: bodyURL, createIfNeeded: true)
+            try Data().write(to: bodyURL)
+            let body = try LocalFileHandle(url: bodyURL)
             var position = range.lowerBound
             while position < range.upperBound {
                 try Task.checkCancellation()

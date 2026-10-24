@@ -21,9 +21,8 @@ public final class LocalFileHandle: AbstractFileHandle, LocalFileIdentifying, Se
     private let storage: LocalFileStorage
     let identity: LocalFileIdentity?
 
-    /// Set `createIfNeeded` for a destination that may not yet exist.
-    public init(url: URL, createIfNeeded: Bool = false) throws {
-        storage = try LocalFileStorage(url: url, createIfNeeded: createIfNeeded)
+    public init(url: URL) throws {
+        storage = try LocalFileStorage(url: url)
         identity = storage.identity
     }
 
@@ -47,7 +46,7 @@ public final class LocalFileHandle: AbstractFileHandle, LocalFileIdentifying, Se
         try await storage.synchronize()
     }
 
-    public func close() async throws {
+    func close() async throws {
         try await storage.close()
     }
 }
@@ -55,18 +54,13 @@ public final class LocalFileHandle: AbstractFileHandle, LocalFileIdentifying, Se
 /// Keeps each seek and I/O operation in the same actor turn. The descriptor is upgraded lazily.
 private actor LocalFileStorage {
     private let url: URL
-    private let createIfNeeded: Bool
     private var file: FileHandle?
     private var writable = false
     nonisolated let identity: LocalFileIdentity?
 
-    init(url: URL, createIfNeeded: Bool) throws {
+    init(url: URL) throws {
         guard url.isFileURL else { throw URLError(.unsupportedURL) }
         self.url = url
-        self.createIfNeeded = createIfNeeded
-        if createIfNeeded, !FileManager.default.fileExists(atPath: url.path) {
-            try FileHandle(fileDescriptor: Self.openCreating(url), closeOnDealloc: true).close()
-        }
         let handle = try FileHandle(forReadingFrom: url)
         file = handle
         var info = stat()
@@ -74,15 +68,6 @@ private actor LocalFileStorage {
             throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
         }
         identity = LocalFileIdentity(device: UInt64(truncatingIfNeeded: info.st_dev), inode: UInt64(info.st_ino))
-    }
-
-    private static func openCreating(_ url: URL) throws -> Int32 {
-        try url.withUnsafeFileSystemRepresentation { path in
-            guard let path else { throw CocoaError(.fileWriteInvalidFileName) }
-            let descriptor = open(path, O_RDWR | O_CREAT | O_CLOEXEC, mode_t(0o666))
-            guard descriptor >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
-            return descriptor
-        }
     }
 
     var size: UInt64 {
@@ -137,12 +122,7 @@ private actor LocalFileStorage {
             return file
         }
         try file?.close()
-        let handle: FileHandle
-        if createIfNeeded {
-            handle = try FileHandle(fileDescriptor: Self.openCreating(url), closeOnDealloc: true)
-        } else {
-            handle = try FileHandle(forUpdating: url)
-        }
+        let handle = try FileHandle(forUpdating: url)
         file = handle
         writable = true
         return handle

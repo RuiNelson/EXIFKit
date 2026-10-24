@@ -5,7 +5,7 @@ public actor InMemoryFileHandle: AbstractFileHandle {
     private var storage: Data
 
     /// A snapshot of the current contents.
-    public var data: Data {
+    var data: Data {
         storage
     }
 
