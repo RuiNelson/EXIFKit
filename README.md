@@ -149,6 +149,14 @@ let metadata = try await EXIFKit.read(from: source)
 let jpeg = try await metadata.readThumbnail()
 ```
 
+To keep the metadata complete after the source is gone, call `loadingThumbnail()` while the source is still available. It returns a copy that holds the thumbnail in memory and no longer refers to the source, so `readThumbnail()` and `write` work after the source is closed or released:
+
+```swift
+// Nothing keeps the local handle once the copy is made, so its file descriptor is closed.
+let metadata = try await EXIFKit.read(from: LocalFileHandle(url: imageURL)).loadingThumbnail()
+let jpeg = try await metadata.readThumbnail()
+```
+
 ### Showing a thumbnail
 
 The data is a regular JPEG, so `UIImage` can decode it directly:

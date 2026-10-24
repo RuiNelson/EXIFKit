@@ -17,9 +17,15 @@ public extension TIFFStructure {
         return try await sourceRegion.read(at: UInt64(offset), count: Int(length))
     }
 
-    internal func preparingForWrite() async throws -> TIFFStructure {
+    /// Returns a copy that holds the embedded thumbnail in memory and no longer refers to the source.
+    ///
+    /// The copy's `readThumbnail()` and edits that write it don't read the source again, so the copy stays complete
+    /// after the source is closed, released or changed. Call this while the source is still available and unchanged.
+    /// It reads the thumbnail once, if the file has one; otherwise it reads nothing.
+    func loadingThumbnail() async throws -> TIFFStructure {
         var copy = self
         copy.loadedThumbnail = try await readThumbnail()
+        copy.sourceRegion = nil
         return copy
     }
 

@@ -175,7 +175,7 @@ enum EditPlanner {
     }
 
     static func serialized(_ structure: TIFFStructure) async throws -> Data {
-        let structure = try await structure.preparingForWrite()
+        let structure = try await structure.loadingThumbnail()
         for ifd in [structure.ifd0, structure.ifd1, structure.exifIFD, structure.gpsIFD, structure.interopIFD]
             .compactMap({ $0 })
         {
