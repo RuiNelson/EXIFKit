@@ -1,26 +1,29 @@
 // swift-tools-version: 6.3
-// The swift-tools-version declares the minimum version of Swift required to build this package.
-
 import PackageDescription
 
 let package = Package(
     name: "EXIFKit",
-    products: [
-        // Products define the executables and libraries a package produces, making them visible to other packages.
-        .library(
-            name: "EXIFKit",
-            targets: ["EXIFKit"]
-        ),
+    platforms: [.macOS(.v12), .iOS(.v15), .tvOS(.v15), .watchOS(.v8)],
+    products: [.library(name: "EXIFKit", targets: ["EXIFKit"])],
+    dependencies: [
+        .package(url: "https://github.com/hummingbird-project/hummingbird.git", from: "2.0.0"),
     ],
     targets: [
-        // Targets are the basic building blocks of a package, defining a module or a test suite.
-        // Targets can depend on other targets in this package and products from dependencies.
-        .target(
-            name: "EXIFKit"
-        ),
+        .target(name: "EXIFKit"),
         .testTarget(
             name: "EXIFKitTests",
-            dependencies: ["EXIFKit"]
+            dependencies: [
+                "EXIFKit",
+                .product(
+                    name: "Hummingbird", package: "hummingbird",
+                    condition: .when(platforms: [.macOS, .iOS, .tvOS, .linux, .visionOS, .macCatalyst])
+                ),
+                .product(
+                    name: "HummingbirdTesting", package: "hummingbird",
+                    condition: .when(platforms: [.macOS, .iOS, .tvOS, .linux, .visionOS, .macCatalyst])
+                ),
+            ],
+            resources: [.copy("Fixtures")]
         ),
     ],
     swiftLanguageModes: [.v6]

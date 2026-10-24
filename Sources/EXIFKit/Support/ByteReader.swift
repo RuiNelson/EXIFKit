@@ -5,8 +5,8 @@ import Foundation
 /// Byte ordering used in TIFF/EXIF structures.
 /// Determined by the first two bytes of the TIFF header: "II" (Intel/little) or "MM" (Motorola/big).
 public enum ByteOrder: Sendable {
-    case littleEndian  // "II" - Intel
-    case bigEndian     // "MM" - Motorola
+    case littleEndian // "II" - Intel
+    case bigEndian // "MM" - Motorola
 }
 
 // MARK: - ByteReader
@@ -20,19 +20,24 @@ public struct ByteReader {
     public var offset: Int
     public var byteOrder: ByteOrder
 
-    public var bytesRemaining: Int { data.count - offset }
-    public var isAtEnd: Bool { offset >= data.count }
+    public var bytesRemaining: Int {
+        offset >= 0 && offset <= data.count ? data.count - offset : 0
+    }
+
+    public var isAtEnd: Bool {
+        offset >= data.count
+    }
 
     public init(data: Data, byteOrder: ByteOrder = .bigEndian) {
         self.data = data
-        self.offset = 0
+        offset = 0
         self.byteOrder = byteOrder
     }
 
     // MARK: - Bounds checking
 
     private func ensureAvailable(_ count: Int) throws {
-        guard count >= 0, offset + count <= data.count else {
+        guard count >= 0, offset >= 0, offset <= data.count, count <= data.count - offset else {
             throw EXIFError.unexpectedEndOfData(
                 needed: count,
                 available: bytesRemaining,
@@ -53,7 +58,7 @@ public struct ByteReader {
     public mutating func readBytes(_ count: Int) throws -> Data {
         try ensureAvailable(count)
         let start = data.startIndex + offset
-        let slice = data[start..<start + count]
+        let slice = data[start ..< start + count]
         offset += count
         return Data(slice)
     }
@@ -63,7 +68,7 @@ public struct ByteReader {
     public mutating func readUInt16() throws -> UInt16 {
         try ensureAvailable(2)
         let start = data.startIndex + offset
-        let raw = data[start..<start + 2]
+        let raw = data[start ..< start + 2]
         offset += 2
         let value = raw.withUnsafeBytes { $0.loadUnaligned(as: UInt16.self) }
         return byteOrder == .littleEndian ? UInt16(littleEndian: value) : UInt16(bigEndian: value)
@@ -72,7 +77,7 @@ public struct ByteReader {
     public mutating func readUInt32() throws -> UInt32 {
         try ensureAvailable(4)
         let start = data.startIndex + offset
-        let raw = data[start..<start + 4]
+        let raw = data[start ..< start + 4]
         offset += 4
         let value = raw.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
         return byteOrder == .littleEndian ? UInt32(littleEndian: value) : UInt32(bigEndian: value)
@@ -133,16 +138,18 @@ public struct ByteWriter {
     public private(set) var data: Data
     public let byteOrder: ByteOrder
 
-    public var count: Int { data.count }
+    public var count: Int {
+        data.count
+    }
 
     public init(byteOrder: ByteOrder = .bigEndian) {
-        self.data = Data()
+        data = Data()
         self.byteOrder = byteOrder
     }
 
     public init(capacity: Int, byteOrder: ByteOrder = .bigEndian) {
-        self.data = Data()
-        self.data.reserveCapacity(capacity)
+        data = Data()
+        data.reserveCapacity(capacity)
         self.byteOrder = byteOrder
     }
 
@@ -210,7 +217,7 @@ public struct ByteWriter {
     public mutating func writeUInt16(at offset: Int, _ value: UInt16) {
         let ordered = byteOrder == .littleEndian ? value.littleEndian : value.bigEndian
         withUnsafeBytes(of: ordered) { buf in
-            for i in 0..<2 {
+            for i in 0 ..< 2 {
                 data[offset + i] = buf[i]
             }
         }
@@ -219,7 +226,7 @@ public struct ByteWriter {
     public mutating func writeUInt32(at offset: Int, _ value: UInt32) {
         let ordered = byteOrder == .littleEndian ? value.littleEndian : value.bigEndian
         withUnsafeBytes(of: ordered) { buf in
-            for i in 0..<4 {
+            for i in 0 ..< 4 {
                 data[offset + i] = buf[i]
             }
         }
