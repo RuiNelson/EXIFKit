@@ -6,6 +6,11 @@ public extension TIFFStructure {
         ifd0.value(for: Tag.make)?.stringValue
     }
 
+    /// Camera manufacturer as a known brand, or nil if unrecognized
+    var makeTyped: CameraMake? {
+        make.flatMap(CameraMake.init(fromExifString:))
+    }
+
     /// Camera model
     var model: String? {
         ifd0.value(for: Tag.model)?.stringValue
@@ -17,6 +22,11 @@ public extension TIFFStructure {
             return v
         }
         return nil
+    }
+
+    /// Image orientation as a known value, or nil if absent or outside 1-8
+    var orientationTyped: ImageOrientation? {
+        orientation.flatMap(ImageOrientation.init(rawValue:))
     }
 
     /// Software used to create/edit the image
@@ -54,6 +64,42 @@ public extension TIFFStructure {
         exifIFD?.value(for: Tag.offsetTimeOriginal)?.stringValue
     }
 
+    /// Timezone offset for dateTimeDigitized (e.g., "+09:00")
+    var offsetTimeDigitized: String? {
+        exifIFD?.value(for: Tag.offsetTimeDigitized)?.stringValue
+    }
+
+    /// Moment the image was taken, or nil if absent or malformed.
+    /// Uses `offsetTimeOriginal` when present; otherwise the time is read as UTC.
+    var taken: Date? {
+        Self.parseDate(dateTimeOriginal, offset: offsetTimeOriginal)
+    }
+
+    /// Moment the image was digitized, or nil if absent or malformed.
+    /// Uses `offsetTimeDigitized` when present; otherwise the time is read as UTC.
+    var digitized: Date? {
+        Self.parseDate(dateTimeDigitized, offset: offsetTimeDigitized)
+    }
+
+    /// Parse an EXIF "yyyy:MM:dd HH:mm:ss" string with an optional "+hh:mm" offset
+    private static func parseDate(_ string: String?, offset: String?) -> Date? {
+        guard let string else { return nil }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy:MM:dd HH:mm:ss"
+        formatter.timeZone = offset.flatMap(timeZone(fromOffset:)) ?? TimeZone(secondsFromGMT: 0)
+        return formatter.date(from: string.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    /// Convert "+hh:mm" / "-hh:mm" to a time zone
+    private static func timeZone(fromOffset offset: String) -> TimeZone? {
+        let parts = offset.trimmingCharacters(in: .whitespacesAndNewlines).split(separator: ":")
+        guard parts.count == 2, let sign = parts[0].first, sign == "+" || sign == "-",
+              let hours = Int(parts[0].dropFirst()), let minutes = Int(parts[1]) else { return nil }
+        let seconds = hours * 3600 + minutes * 60
+        return TimeZone(secondsFromGMT: sign == "-" ? -seconds : seconds)
+    }
+
     /// ISO speed
     var iso: UInt16? {
         if case let .short(v) = exifIFD?.value(for: Tag.isoSpeedRatings) {
@@ -89,6 +135,21 @@ public extension TIFFStructure {
         exifIFD?.value(for: Tag.exposureTime)?.doubleValue
     }
 
+    /// Exposure time as a reduced fraction of seconds (e.g. 1/250), or nil if absent or not positive
+    var exposureTimeFraction: URational? {
+        let raw: URational
+        if case let .rational(r) = exifIFD?.value(for: Tag.exposureTime) {
+            raw = r
+        } else if let exposureTime, exposureTime > 0 {
+            raw = URational(exposureTime)
+        } else {
+            return nil
+        }
+        guard raw.numerator > 0, raw.denominator > 0 else { return nil }
+
+        return raw.reduced
+    }
+
     /// Exposure bias / compensation in EV
     var exposureBias: Double? {
         exifIFD?.value(for: Tag.exposureBias)?.doubleValue
@@ -102,6 +163,11 @@ public extension TIFFStructure {
     /// Lens manufacturer
     var lensMake: String? {
         exifIFD?.value(for: Tag.lensMake)?.stringValue
+    }
+
+    /// Lens manufacturer as a known brand, or nil if unrecognized
+    var lensMakeTyped: LensMake? {
+        lensMake.flatMap(LensMake.init(fromExifString:))
     }
 
     /// Flash fired (bit 0 of flash tag)
@@ -118,6 +184,11 @@ public extension TIFFStructure {
             return v
         }
         return nil
+    }
+
+    /// Color space as a known value, or nil if absent or unrecognized
+    var colorSpaceTyped: ImageColorSpace? {
+        colorSpace.flatMap(ImageColorSpace.init(rawValue:))
     }
 
     /// Pixel width from EXIF

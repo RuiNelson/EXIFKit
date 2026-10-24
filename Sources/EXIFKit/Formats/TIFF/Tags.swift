@@ -50,6 +50,7 @@ public enum Tag {
     public static let dateTimeDigitized: UInt16 = 0x9004
     public static let offsetTime: UInt16 = 0x9010
     public static let offsetTimeOriginal: UInt16 = 0x9011
+    public static let offsetTimeDigitized: UInt16 = 0x9012
     public static let shutterSpeedValue: UInt16 = 0x9201
     public static let apertureValue: UInt16 = 0x9202
     public static let brightnessValue: UInt16 = 0x9203
@@ -92,7 +93,12 @@ public enum Tag {
     public static let gpsAltitude: UInt16 = 0x0006
     public static let gpsTimeStamp: UInt16 = 0x0007
     public static let gpsSatellites: UInt16 = 0x0008
+    public static let gpsSpeedRef: UInt16 = 0x000C
+    public static let gpsSpeed: UInt16 = 0x000D
+    public static let gpsTrackRef: UInt16 = 0x000E
+    public static let gpsTrack: UInt16 = 0x000F
     public static let gpsMapDatum: UInt16 = 0x0012
+    public static let gpsHPositioningError: UInt16 = 0x001F
     public static let gpsDateStamp: UInt16 = 0x001D
 
     // MARK: Tag Name Lookup
@@ -137,6 +143,7 @@ public enum Tag {
         dateTimeDigitized: "DateTimeDigitized",
         offsetTime: "OffsetTime",
         offsetTimeOriginal: "OffsetTimeOriginal",
+        offsetTimeDigitized: "OffsetTimeDigitized",
         shutterSpeedValue: "ShutterSpeedValue",
         apertureValue: "ApertureValue",
         brightnessValue: "BrightnessValue",
@@ -170,7 +177,12 @@ public enum Tag {
         gpsAltitude: "GPSAltitude",
         gpsTimeStamp: "GPSTimeStamp",
         gpsSatellites: "GPSSatellites",
+        gpsSpeedRef: "GPSSpeedRef",
+        gpsSpeed: "GPSSpeed",
+        gpsTrackRef: "GPSTrackRef",
+        gpsTrack: "GPSTrack",
         gpsMapDatum: "GPSMapDatum",
         gpsDateStamp: "GPSDateStamp",
+        gpsHPositioningError: "GPSHPositioningError",
     ]
 }
