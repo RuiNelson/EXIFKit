@@ -56,6 +56,31 @@ struct RealFileTests {
         try EXIFOracleTag.assertMatches(fromURL, tags: oracle)
     }
 
+    @Test func loadedThumbnailOutlivesTheSource() async throws {
+        let expected = try NikonFixture.thumbnail()
+        weak var released: MeasuredLocalFile?
+        let loaded: TIFFStructure
+        do {
+            let source = try MeasuredLocalFile(url: NikonFixture.url())
+            released = source
+            let metadata = try await EXIFKit.read(from: source)
+            loaded = try await metadata.loadingThumbnail()
+            #expect(await source.transferred > expected.count)
+        }
+        #expect(released == nil)
+        #expect(try await loaded.readThumbnail() == expected)
+
+        // An edit copies the thumbnail it holds, not one read from the new source.
+        let destination = InMemoryFileHandle()
+        try await EXIFKit.write(loaded, from: LocalFileHandle(url: NikonFixture.url()), to: destination)
+        #expect(try await EXIFKit.read(from: destination).readThumbnail() == expected)
+
+        // Without a thumbnail there is nothing to load.
+        var plain = TIFFStructure(byteOrder: .littleEndian)
+        plain.ifd0.set(tagID: Tag.make, value: .ascii("Plain"))
+        #expect(try await plain.loadingThumbnail().readThumbnail() == nil)
+    }
+
     @Test func nikonThumbnailMatchesExiv2AndIsFetchedOnlyOnDemand() async throws {
         let source = try MeasuredLocalFile(url: NikonFixture.url())
         let metadata = try await EXIFKit.read(from: source)
