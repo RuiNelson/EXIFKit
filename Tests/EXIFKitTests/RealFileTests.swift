@@ -5,6 +5,7 @@ import Testing
 private actor MeasuredLocalFile: AbstractFileHandle {
     private let source: LocalFileHandle
     private(set) var transferred = 0
+    private(set) var reads = 0
 
     init(url: URL) throws {
         source = try LocalFileHandle(url: url)
@@ -17,6 +18,7 @@ private actor MeasuredLocalFile: AbstractFileHandle {
     func read(at offset: UInt64, count: Int) async throws -> Data {
         let bytes = try await source.read(at: offset, count: count)
         transferred += bytes.count
+        reads += 1
         return bytes
     }
 
@@ -44,7 +46,12 @@ struct RealFileTests {
         #expect(metadata.focalLength == 45)
         #expect(metadata.pixelWidth == 4288)
         #expect(metadata.pixelHeight == 2848)
-        #expect(await source.transferred < 4096)
+        // The caller's 16-byte detection read, then one block for all metadata.
+        #expect(await source.reads == 2)
+        #expect(await source.transferred == 16 + 65536)
+        let exact = try MeasuredLocalFile(url: url)
+        try await EXIFOracleTag.assertMatches(EXIFKit.read(from: exact, options: ReadOptions(readAheadBytes: 0)), tags: oracle)
+        #expect(await exact.transferred < 4096)
         let fromURL = try await EXIFKit.read(from: url)
         try EXIFOracleTag.assertMatches(fromURL, tags: oracle)
     }
@@ -53,7 +60,7 @@ struct RealFileTests {
         let source = try MeasuredLocalFile(url: NikonFixture.url())
         let metadata = try await EXIFKit.read(from: source)
         let beforeThumbnail = await source.transferred
-        #expect(beforeThumbnail < 4096)
+        #expect(await source.reads == 1)
         let expected = try NikonFixture.thumbnail()
         #expect(expected.count == 6924)
         #expect(try await metadata.readThumbnail() == expected)

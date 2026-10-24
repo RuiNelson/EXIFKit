@@ -16,6 +16,13 @@
         }
     }
 
+    private actor PeerLog {
+        var all: [String] = []
+        func record(_ peer: String) {
+            all.append(peer)
+        }
+    }
+
     struct HTTPHandleTests {
         enum Behavior: Sendable { case normal, ignoreRange, malformedRange, shortBody, changed, error, empty }
 
@@ -76,14 +83,50 @@
                 #expect(try await handle.size == UInt64(data.count))
                 var metadata = try await EXIFKit.read(from: handle)
                 #expect(metadata.iso == 640)
-                #expect(await log.bytes < 4096)
-                #expect(await log.ranges.count < 30)
+                // The size probe, then one 64 KiB block holding the whole APP1 segment.
+                #expect(await log.ranges == [0 ..< 1, 0 ..< 65536])
                 metadata.ifd0.set(tagID: Tag.make, value: .ascii("HTTP edited"))
                 let destination = InMemoryFileHandle()
                 try await EXIFKit.write(metadata, from: handle, to: destination)
                 #expect(try await EXIFKit.read(from: destination).make == "HTTP edited")
                 #expect(await destination.data.suffix(100_000) == data.suffix(100_000))
                 #expect(await log.ranges.allSatisfy { $0.count <= 65536 })
+            }
+        }
+
+        @Test func requestsReuseOneConnection() async throws {
+            guard #available(macOS 14, iOS 17, tvOS 17, *) else { return }
+            struct PeerContext: RequestContext {
+                var coreContext: CoreRequestContextStorage
+                let peer: String
+                init(source: ApplicationRequestContextSource) {
+                    coreContext = .init(source: source)
+                    peer = String(describing: source.channel.remoteAddress)
+                }
+            }
+            let data = HandleTests.jpeg(TIFFSerializer.encode(HandleTests.metadata())) + Data(count: 256 * 1024)
+            let peers = PeerLog()
+            let router = Router(context: PeerContext.self)
+            router.get("/image") { request, context -> Response in
+                await peers.record(context.peer)
+                let range = (request.headers[.range] ?? "").dropFirst(6).split(separator: "-").compactMap { Int($0) }
+                guard range.count == 2 else { return Response(status: .badRequest) }
+                let slice = data.subdata(in: range[0] ..< range[1] + 1)
+                return Response(
+                    status: .partialContent,
+                    headers: [.contentRange: "bytes \(range[0])-\(range[1])/\(data.count)", .contentLength: "\(slice.count)"],
+                    body: .init(byteBuffer: .init(bytes: slice))
+                )
+            }
+            let app = Application(router: router, configuration: .init(address: .hostname("127.0.0.1", port: 0)))
+            try await app.test(.live) { client in
+                let port = try #require(client.port)
+                let handle = try await HTTPFileHandle(url: URL(string: "http://localhost:\(port)/image")!)
+                // Exact reads, so the extraction issues many requests.
+                #expect(try await EXIFKit.read(from: handle, options: ReadOptions(readAheadBytes: 0)).iso == 640)
+                _ = try await handle.read(at: 50000, count: 200_000)
+                #expect(await peers.all.count > 10)
+                #expect(Set(await peers.all).count == 1)
             }
         }
 
@@ -138,11 +181,11 @@
                 let handle = try await HTTPFileHandle(url: url)
                 let metadata = try await EXIFKit.read(from: handle)
                 try EXIFOracleTag.assertMatches(metadata, tags: oracle)
-                let beforeThumbnail = await log.bytes
-                #expect(beforeThumbnail < 4096)
+                #expect(await log.ranges.count == 2)
+                // The thumbnail lies in the block already staged by the handle.
                 let expected = try NikonFixture.thumbnail()
                 #expect(try await metadata.readThumbnail() == expected)
-                #expect(await log.bytes - beforeThumbnail == expected.count)
+                #expect(await log.ranges.count == 2)
             }
         }
 

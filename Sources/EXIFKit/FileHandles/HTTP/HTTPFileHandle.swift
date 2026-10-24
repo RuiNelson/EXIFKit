@@ -8,6 +8,7 @@ import Foundation
 /// sent by `synchronize()` with offset PATCH requests, falling back to a streamed PUT.
 public actor HTTPFileHandle: AbstractFileHandle {
     private let url: URL
+    private let session: HTTPSession
     private let stagingURL: URL
     private let staging: LocalFileHandle
     private let operations = HTTPFileOperations()
@@ -22,8 +23,12 @@ public actor HTTPFileHandle: AbstractFileHandle {
     public init(url: URL) async throws {
         guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { throw URLError(.unsupportedURL) }
         self.url = url
+        let session = HTTPSession()
+        self.session = session
         do {
-            let response = try await HTTPRangeRequest.fetch(url: url, offset: 0, count: 1, size: nil, validator: nil)
+            let response = try await HTTPRangeRequest.fetch(
+                session, url: url, offset: 0, count: 1, size: nil, validator: nil
+            )
             length = response.size
             validator = response.validator
             resourceExists = true
@@ -127,7 +132,7 @@ public actor HTTPFileHandle: AbstractFileHandle {
             try Task.checkCancellation()
             let count = Int(min(65536, range.upperBound - position))
             let response = try await HTTPRangeRequest.fetch(
-                url: url, offset: position, count: count, size: length, validator: validator
+                session, url: url, offset: position, count: count, size: length, validator: validator
             )
             try await staging.write(response.data, at: position)
             position += UInt64(count)
@@ -163,7 +168,9 @@ public actor HTTPFileHandle: AbstractFileHandle {
         if let updatedValidator = HTTPValidator(response) {
             validator = updatedValidator
         } else {
-            let response = try await HTTPRangeRequest.fetch(url: url, offset: 0, count: 1, size: nil, validator: nil)
+            let response = try await HTTPRangeRequest.fetch(
+                session, url: url, offset: 0, count: 1, size: nil, validator: nil
+            )
             guard response.size == length else {
                 throw invalidHTTPResponse(response.response, "Server did not apply the requested length")
             }
@@ -211,7 +218,7 @@ public actor HTTPFileHandle: AbstractFileHandle {
             request.setValue("*", forHTTPHeaderField: "If-None-Match")
         }
         request.setValue(String(range.upperBound - range.lowerBound), forHTTPHeaderField: "Content-Length")
-        return try await HTTPFileUpload.send(request, fromFile: bodyURL)
+        return try await HTTPFileUpload.send(request, fromFile: bodyURL, session: session)
     }
 
     private func clipped(_ ranges: [Range<UInt64>], to size: UInt64) -> [Range<UInt64>] {
@@ -320,14 +327,11 @@ func httpRangeURLRequest(url: URL, offset: UInt64, count: Int, validator: HTTPVa
 
 #if !canImport(FoundationNetworking)
     enum HTTPRangeRequest {
-        static func fetch(url: URL, offset: UInt64, count: Int, size: UInt64?, validator: HTTPValidator?) async throws -> HTTPRangeResponse {
-            let config = URLSessionConfiguration.ephemeral
-            config.urlCache = nil
-            config.requestCachePolicy = .reloadIgnoringLocalCacheData
-            let session = URLSession(configuration: config)
-            defer { session.invalidateAndCancel() }
+        static func fetch(
+            _ session: HTTPSession, url: URL, offset: UInt64, count: Int, size: UInt64?, validator: HTTPValidator?
+        ) async throws -> HTTPRangeResponse {
             let request = httpRangeURLRequest(url: url, offset: offset, count: count, validator: validator)
-            let (stream, response) = try await session.bytes(for: request)
+            let (stream, response) = try await session.session.bytes(for: request)
             defer { stream.task.cancel() }
             let length = try validateHTTPRange(response, offset: offset, count: count, size: size, validator: validator)
             if length == 0 {

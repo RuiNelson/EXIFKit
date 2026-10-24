@@ -44,23 +44,24 @@ let fromData = try await EXIFKit.read(from: imageData)
 let fromURL = try await EXIFKit.read(from: imageURL)
 ```
 
-The parser follows metadata offsets and skips image payloads. It batches adjacent IFD values and maintains a 64 KiB cache per extraction, without prefetching image data. Results retain the source handle for deferred thumbnail reads; keep that source unchanged while using them.
+The parser follows metadata offsets and skips image payloads. To keep remote round trips few, it reads aligned 64 KiB blocks, fetches each contiguous run of missing blocks in one handle read, and reads independent directories and values concurrently. A typical JPEG, HEIF, JXL or RAW extraction takes one to four handle reads. Set `readAheadBytes` to 0 to read exact ranges instead, which transfers the least data but needs more reads. The block cache is dropped once the extraction returns. Results retain the source handle for deferred thumbnail reads; keep that source unchanged while using them.
 
-`HTTPFileHandle` discovers the file size with a one-byte range request and uses HTTP `Range` for subsequent reads. It validates `206`, `Content-Range`, body length and resource size. Servers returning the whole file are rejected before their body is buffered. Strong ETags or Last-Modified headers, when provided, are checked on later requests; without validators, a same-sized remote replacement cannot be detected. Writes are staged on disk and sent by `synchronize()`.
+`HTTPFileHandle` discovers the file size with a one-byte range request and uses HTTP `Range` for subsequent reads. All requests of a handle share one `URLSession`, so they reuse its connections instead of repeating TCP and TLS setup. It validates `206`, `Content-Range`, body length and resource size. Servers returning the whole file are rejected before their body is buffered. Strong ETags or Last-Modified headers, when provided, are checked on later requests; without validators, a same-sized remote replacement cannot be detected. Writes are staged on disk and sent by `synchronize()`.
 
-Metadata reads and decoded values are each limited to 32 MiB per extraction, individual values to 10 MiB, and underlying read operations to 4096. The total byte and operation limits are configurable:
+Metadata reads (read-ahead included) and decoded values are each limited to 32 MiB per extraction, individual values to 10 MiB, and underlying read operations to 4096. Read-ahead falls back to exact reads rather than exceed these limits. The limits and the block size are configurable:
 
 ```swift
 let options = ReadOptions(
     maximumMetadataBytes: 64 * 1024 * 1024,
-    maximumReadOperations: 8192
+    maximumReadOperations: 8192,
+    readAheadBytes: 256 * 1024
 )
 let metadata = try await EXIFKit.read(from: source, options: options)
 ```
 
 ## Writing and removing metadata
 
-Write to a separate destination implementing `AbstractFileHandle`. Unchanged data is copied in blocks of at most 64 KiB; only metadata is assembled in memory. Writing from HTTP therefore transfers the image data needed to produce the output file.
+Write to a separate destination implementing `AbstractFileHandle`. Unchanged data is copied in blocks of at most 1 MiB, reading the next block while the current one is written; only metadata is assembled in memory. Writing from HTTP therefore transfers the image data needed to produce the output file.
 
 ```swift
 var metadata = try await EXIFKit.read(from: source)

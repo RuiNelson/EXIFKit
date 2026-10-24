@@ -5,6 +5,7 @@
 
     /// FoundationNetworking has no AsyncBytes API. The delegate bridge keeps all mutable state in
     /// a checked Sendable Mutex; it validates headers before allowing a bounded response body.
+    /// The handle's session routes this task's callbacks here.
     final class HTTPRangeRequest: NSObject, URLSessionDataDelegate, Sendable {
         private struct State {
             var continuation: CheckedContinuation<HTTPRangeResponse, any Error>?
@@ -29,18 +30,15 @@
             self.validator = validator
         }
 
-        static func fetch(url: URL, offset: UInt64, count: Int, size: UInt64?, validator: HTTPValidator?) async throws
-            -> HTTPRangeResponse
-        {
+        static func fetch(
+            _ session: HTTPSession, url: URL, offset: UInt64, count: Int, size: UInt64?, validator: HTTPValidator?
+        ) async throws -> HTTPRangeResponse {
             let delegate = HTTPRangeRequest(offset: offset, count: count, size: size, validator: validator)
             return try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { continuation in
-                    let config = URLSessionConfiguration.ephemeral
-                    config.urlCache = nil
-                    config.requestCachePolicy = .reloadIgnoringLocalCacheData
-                    let session = URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
                     let request = httpRangeURLRequest(url: url, offset: offset, count: count, validator: validator)
-                    let task = session.dataTask(with: request)
+                    let task = session.session.dataTask(with: request)
+                    session.router.register(delegate, for: task)
                     delegate.state.withLock { state in
                         state.continuation = continuation
                         state.task = task
@@ -49,7 +47,6 @@
                             task.cancel()
                         }
                     }
-                    session.finishTasksAndInvalidate()
                 }
             } onCancel: {
                 delegate.state.withLock { state in

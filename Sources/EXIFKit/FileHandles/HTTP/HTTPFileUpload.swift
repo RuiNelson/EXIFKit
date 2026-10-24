@@ -8,15 +8,13 @@ import Foundation
 /// Both implementations stream from a file and stop at response headers, without retaining
 /// a potentially large response body. Errors produced by URLSession pass through unchanged.
 enum HTTPFileUpload {
-    static func send(_ request: URLRequest, fromFile url: URL) async throws -> HTTPURLResponse {
+    static func send(_ request: URLRequest, fromFile url: URL, session: HTTPSession) async throws -> HTTPURLResponse {
         #if canImport(FoundationNetworking)
-            return try await HTTPUploadRequest.send(request, fromFile: url)
+            return try await HTTPUploadRequest.send(request, fromFile: url, session: session)
         #else
             var request = request
             request.httpBodyStream = InputStream(url: url)
-            let session = URLSession(configuration: .ephemeral)
-            defer { session.invalidateAndCancel() }
-            let (stream, response) = try await session.bytes(for: request, delegate: HTTPUploadBody(file: url))
+            let (stream, response) = try await session.session.bytes(for: request, delegate: HTTPUploadBody(file: url))
             defer { stream.task.cancel() }
             guard let response = response as? HTTPURLResponse else {
                 throw invalidHTTPResponse(response, "Expected HTTP response")
@@ -51,12 +49,12 @@ enum HTTPFileUpload {
 
         private let state = Mutex(State())
 
-        static func send(_ request: URLRequest, fromFile file: URL) async throws -> HTTPURLResponse {
+        static func send(_ request: URLRequest, fromFile file: URL, session: HTTPSession) async throws -> HTTPURLResponse {
             let delegate = HTTPUploadRequest()
             return try await withTaskCancellationHandler {
                 try await withCheckedThrowingContinuation { continuation in
-                    let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
-                    let task = session.uploadTask(with: request, fromFile: file)
+                    let task = session.session.uploadTask(with: request, fromFile: file)
+                    session.router.register(delegate, for: task)
                     delegate.state.withLock { state in
                         state.continuation = continuation
                         state.task = task
@@ -65,7 +63,6 @@ enum HTTPFileUpload {
                             task.cancel()
                         }
                     }
-                    session.finishTasksAndInvalidate()
                 }
             } onCancel: {
                 delegate.state.withLock { state in

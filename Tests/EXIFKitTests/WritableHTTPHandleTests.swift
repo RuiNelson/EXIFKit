@@ -1,6 +1,9 @@
 #if canImport(Hummingbird)
     @testable import EXIFKit
     import Foundation
+    #if canImport(FoundationNetworking)
+        import FoundationNetworking
+    #endif
     import Hummingbird
     import HummingbirdTesting
     import Testing
@@ -252,7 +255,7 @@
             try await server(initial: bytes) { url, state in
                 let handle = try await HTTPFileHandle(url: url)
                 #expect(try await EXIFKit.read(from: handle).iso == 640)
-                #expect(await state.downloaded < 4096)
+                #expect(await state.downloaded <= 65537)
                 let task = Task {
                     withUnsafeCurrentTask { $0?.cancel() }
                     try await handle.write(Data([9]), at: 0)

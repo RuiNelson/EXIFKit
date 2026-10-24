@@ -4,9 +4,16 @@ import Foundation
 public struct ReadOptions: Sendable {
     public var maximumMetadataBytes: Int
     public var maximumReadOperations: Int
-    public init(maximumMetadataBytes: Int = 32 * 1024 * 1024, maximumReadOperations: Int = 4096) {
+    /// Metadata is fetched in aligned blocks of this size, so nearby structures arrive in one handle read.
+    /// This trades a little transfer for far fewer round trips on remote handles. 0 fetches exact ranges.
+    public var readAheadBytes: Int
+    public init(
+        maximumMetadataBytes: Int = 32 * 1024 * 1024, maximumReadOperations: Int = 4096,
+        readAheadBytes: Int = 64 * 1024
+    ) {
         self.maximumMetadataBytes = maximumMetadataBytes
         self.maximumReadOperations = maximumReadOperations
+        self.readAheadBytes = readAheadBytes
     }
 }
 
@@ -84,17 +91,21 @@ final class FileRegion: AbstractFileHandle, Sendable {
     }
 }
 
-/// Exact-read cache, scoped to one extraction. Never prefetches image bytes.
+/// Block cache scoped to one extraction. Misses fetch whole aligned blocks, one handle read per contiguous run,
+/// and concurrent parsers share in-flight fetches. After `finish()` reads are exact and nothing is retained.
 actor MetadataReader: AbstractFileHandle {
     let source: any AbstractFileHandle
     let length: UInt64
     let limit: Int
+    private let blockSize: UInt64
     private var transferred = 0
     private var decoded = 0
     private var operations = 0
     private let maximumOperations: Int
-    private var cache: [(offset: UInt64, bytes: Data)] = []
-    private var cacheSize = 0
+    private var blocks: [UInt64: Task<Data, any Error>] = [:]
+    private var recent: [UInt64] = []
+    private var finished = false
+    private static let cachedBlocks = 16
     var size: UInt64 {
         get async throws { length }
     }
@@ -104,11 +115,19 @@ actor MetadataReader: AbstractFileHandle {
         length = size
         limit = max(0, options.maximumMetadataBytes)
         maximumOperations = max(0, options.maximumReadOperations)
+        blockSize = UInt64(max(0, options.readAheadBytes))
     }
 
     func reserveMetadata(_ count: Int) throws {
         guard count >= 0, count <= limit - decoded else { throw EXIFError.resourceLimitExceeded }
         decoded += count
+    }
+
+    /// Drop cached blocks once parsing is done; a structure may keep this reader for its lazy thumbnail.
+    func finish() {
+        finished = true
+        blocks = [:]
+        recent = []
     }
 
     func read(at offset: UInt64, count: Int) async throws -> Data {
@@ -117,27 +136,79 @@ actor MetadataReader: AbstractFileHandle {
         if count == 0 {
             return Data()
         }
-        for item in cache.reversed() where offset >= item.offset {
-            let delta = offset - item.offset
-            if delta <= UInt64(item.bytes.count), UInt64(count) <= UInt64(item.bytes.count) - delta {
-                return item.bytes.subdata(in: Int(delta) ..< Int(delta) + count)
+        let first = blockSize == 0 ? 0 : offset / blockSize
+        let last = blockSize == 0 ? 0 : (offset + UInt64(count) - 1) / blockSize
+        guard blockSize > 0, !finished, last - first < UInt64(Self.cachedBlocks) else {
+            return try await fetch(offset ..< offset + UInt64(count))
+        }
+        var runs: [ClosedRange<UInt64>] = []
+        for index in first ... last where blocks[index] == nil {
+            if let run = runs.last, run.upperBound + 1 == index {
+                runs[runs.count - 1] = run.lowerBound ... index
+            } else {
+                runs.append(index ... index)
             }
         }
+        let missing = runs.reduce(0) { $0 + Int(bytes($1).count) }
+        guard missing <= limit - transferred, runs.count <= maximumOperations - operations else {
+            // Read-ahead must not exhaust a budget the exact range would fit in.
+            return try await fetch(offset ..< offset + UInt64(count))
+        }
+        transferred += missing
+        operations += runs.count
+        for run in runs {
+            let range = bytes(run)
+            let source = source
+            let fetched = Task { try await Self.exact(source, range) }
+            for index in run {
+                let lower = Int((index * blockSize) - range.lowerBound)
+                let upper = Int(min(length, (index + 1) * blockSize) - range.lowerBound)
+                blocks[index] = Task { try await fetched.value.subdata(in: lower ..< upper) }
+            }
+        }
+        let tasks = (first ... last).map { blocks[$0]! }
+        recent.removeAll { (first ... last).contains($0) }
+        recent.append(contentsOf: first ... last)
+        while recent.count > Self.cachedBlocks {
+            blocks[recent.removeFirst()] = nil
+        }
+        var result = Data(capacity: count)
+        do {
+            for (index, task) in zip(first ... last, tasks) {
+                let block = try await task.value
+                let start = index == first ? Int(offset - first * blockSize) : 0
+                let end = index == last ? Int(offset + UInt64(count) - last * blockSize) : block.count
+                result.append(block.subdata(in: start ..< end))
+            }
+        } catch {
+            for (index, task) in zip(first ... last, tasks) where blocks[index] == task {
+                blocks[index] = nil
+            }
+            throw error
+        }
+        return result
+    }
+
+    private func bytes(_ run: ClosedRange<UInt64>) -> Range<UInt64> {
+        run.lowerBound * blockSize ..< min(length, (run.upperBound + 1) * blockSize)
+    }
+
+    private func fetch(_ range: Range<UInt64>) async throws -> Data {
+        let count = Int(range.count)
         guard count <= limit - transferred, operations < maximumOperations else {
             throw EXIFError.resourceLimitExceeded
         }
         transferred += count
         operations += 1
-        let data = try await source.read(at: offset, count: count)
+        return try await Self.exact(source, range)
+    }
+
+    private static func exact(_ source: any AbstractFileHandle, _ range: Range<UInt64>) async throws -> Data {
+        let count = Int(range.count)
+        let data = try await source.read(at: range.lowerBound, count: count)
         guard data.count == count else { throw FileAccessError.shortRead(expected: count, actual: data.count) }
-        if count <= 65536 {
-            while cacheSize + count > 65536, !cache.isEmpty {
-                cacheSize -= cache.removeFirst().bytes.count
-            }
-            cache.append((offset, data))
-            cacheSize += count
-        }
-        return data
+        // Normalize slices so block offsets are zero-based.
+        return data.startIndex == 0 ? data : Data(data)
     }
 
     func write(_: Data, at _: UInt64) async throws {
@@ -209,17 +280,27 @@ enum HandleParser {
         let ifd0 = try await ifd(file, at: UInt64(offset), order: order)
         var result = TIFFStructure(byteOrder: order, ifd0: ifd0)
         var visited: Set<UInt32> = [offset]
-        func directory(_ pointer: UInt32?) async throws -> IFD? {
+        func claim(_ pointer: UInt32?) throws -> UInt64? {
             guard let pointer, pointer != 0 else { return nil }
             guard pointer >= 8, visited.insert(pointer).inserted else {
                 throw EXIFError.corruptedIFD("Cyclic or overlapping directory pointer")
             }
-            return try await ifd(file, at: UInt64(pointer), order: order)
+            return UInt64(pointer)
         }
-        result.ifd1 = try await directory(ifd0.nextIFDOffset)
-        result.exifIFD = try await directory(ifd0.value(for: Tag.exifIFDPointer)?.uint32Value)
-        result.gpsIFD = try await directory(ifd0.value(for: Tag.gpsIFDPointer)?.uint32Value)
-        result.interopIFD = try await directory(result.exifIFD?.value(for: Tag.interopIFDPointer)?.uint32Value)
+        @Sendable func directory(_ offset: UInt64?) async throws -> IFD? {
+            guard let offset else { return nil }
+            return try await ifd(file, at: offset, order: order)
+        }
+        // Sibling directories are independent, so their reads can share a round trip.
+        let ifd1Offset = try claim(ifd0.nextIFDOffset)
+        let exifOffset = try claim(ifd0.value(for: Tag.exifIFDPointer)?.uint32Value)
+        let gpsOffset = try claim(ifd0.value(for: Tag.gpsIFDPointer)?.uint32Value)
+        async let ifd1 = directory(ifd1Offset)
+        async let gps = directory(gpsOffset)
+        result.exifIFD = try await directory(exifOffset)
+        result.interopIFD = try await directory(claim(result.exifIFD?.value(for: Tag.interopIFDPointer)?.uint32Value))
+        result.ifd1 = try await ifd1
+        result.gpsIFD = try await gps
         result.sourceRegion = file
         return result
     }
@@ -271,9 +352,11 @@ enum HandleParser {
                 ranges.append(range)
             }
         }
-        var values: [(Range<UInt64>, Data)] = []
-        for range in ranges {
-            try values.append((range, await file.read(at: range.lowerBound, count: Int(range.count))))
+        let values = try await withThrowingTaskGroup(of: (Range<UInt64>, Data).self) { group in
+            for range in ranges {
+                group.addTask { try await (range, file.read(at: range.lowerBound, count: Int(range.count))) }
+            }
+            return try await group.reduce(into: []) { $0.append($1) }
         }
         var decoded: [IFDEntry] = []
         for entry in entries {

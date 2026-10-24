@@ -26,7 +26,7 @@ struct FileEdit {
 }
 
 extension EXIFKit {
-    /// Stream a modified file to a separate destination. Image bytes are copied in 64 KiB blocks.
+    /// Stream a modified file to a separate destination. Image bytes are copied in 1 MiB blocks.
     /// Validation happens before the destination is truncated. I/O failures can leave a partial destination;
     /// use a temporary file and rename it after success when replacing an existing file.
     public static func write(
@@ -94,17 +94,24 @@ extension EXIFKit {
         try await destination.truncate(to: 0)
         var input: UInt64 = 0
         var output: UInt64 = 0
+        @Sendable func block(at position: UInt64, until end: UInt64) async throws -> Data? {
+            guard position < end else { return nil }
+            try Task.checkCancellation()
+            let amount = Int(min(1024 * 1024, end - position))
+            let data = try await source.read(at: position, count: amount)
+            guard data.count == amount else { throw FileAccessError.shortRead(expected: amount, actual: data.count) }
+            return data
+        }
         func copy(until end: UInt64) async throws {
-            while input < end {
-                try Task.checkCancellation()
-                let amount = Int(min(65536, end - input))
-                let data = try await source.read(at: input, count: amount)
-                guard data.count == amount else {
-                    throw FileAccessError.shortRead(expected: amount, actual: data.count)
-                }
+            // Fetch the next block while the current one is written, so source and destination latency overlap.
+            var next = try await block(at: input, until: end)
+            while let data = next {
+                let position = input + UInt64(data.count)
+                async let following = block(at: position, until: end)
                 try await destination.write(data, at: output)
-                input += UInt64(amount)
-                output += UInt64(amount)
+                input += UInt64(data.count)
+                output += UInt64(data.count)
+                next = try await following
             }
         }
         for edit in edits {

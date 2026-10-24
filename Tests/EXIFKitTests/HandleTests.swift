@@ -54,6 +54,9 @@ actor SparseFile: AbstractFileHandle {
 }
 
 struct HandleTests {
+    /// Exact reads, so tests can reject any access to image payloads.
+    static let exact = ReadOptions(readAheadBytes: 0)
+
     static func metadata(_ order: ByteOrder = .littleEndian) -> TIFFStructure {
         var structure = TIFFStructure(byteOrder: order)
         structure.ifd0.set(tagID: Tag.make, value: .ascii("Range Camera"))
@@ -244,9 +247,12 @@ struct HandleTests {
     @Test func sparseMultiGigabyteTIFFReadsOnlyMetadata() async throws {
         let tiff = TIFFSerializer.encode(Self.metadata(.bigEndian))
         let source = SparseFile(size: 8 * 1024 * 1024 * 1024, regions: [(0, tiff)], allowed: [0 ..< UInt64(tiff.count)])
-        let parsed = try await EXIFKit.read(from: source)
+        let parsed = try await EXIFKit.read(from: source, options: Self.exact)
         #expect(parsed.iso == 640)
         #expect(await source.transferred < 4096)
+        let ahead = SparseFile(size: 8 * 1024 * 1024 * 1024, regions: [(0, tiff)])
+        #expect(try await EXIFKit.read(from: ahead).iso == 640)
+        #expect(await ahead.reads == [0 ..< 65536])
     }
 
     @Test func sparsePNGSkipsGigabyteIDAT() async throws {
@@ -262,8 +268,13 @@ struct HandleTests {
             size: offset + UInt64(end.count), regions: [(0, start), (offset, end)],
             allowed: [0 ..< UInt64(start.count), offset ..< offset + UInt64(end.count)]
         )
-        #expect(try await EXIFKit.read(from: source).make == "Range Camera")
+        #expect(try await EXIFKit.read(from: source, options: Self.exact).make == "Range Camera")
         #expect(await source.transferred < 4096)
+        // Read-ahead stays within the blocks holding chunk headers and the eXIf chunk.
+        let ahead = SparseFile(size: offset + UInt64(end.count), regions: [(0, start), (offset, end)])
+        #expect(try await EXIFKit.read(from: ahead).make == "Range Camera")
+        #expect(await ahead.reads.count == 2)
+        #expect(await ahead.transferred <= 2 * 65536)
     }
 
     @Test func fragmentedAndIdatHEIF() async throws {
@@ -327,11 +338,17 @@ extension HandleTests {
             size: 16 * 1024 * 1024, regions: [(0, writer.data), (thumbnailOffset, thumbnail)],
             allowed: [0 ..< UInt64(writer.count), thumbnailOffset ..< thumbnailOffset + UInt64(thumbnail.count)]
         )
-        let parsed = try await EXIFKit.read(from: source)
+        let parsed = try await EXIFKit.read(from: source, options: Self.exact)
         #expect(await source.reads.allSatisfy { $0.upperBound <= UInt64(writer.count) })
         #expect(try await parsed.thumbnailData == thumbnail)
         let serialized = try await TIFFSerializer.serialize(parsed)
         #expect(try await EXIFKit.read(from: serialized).thumbnailData == thumbnail)
+        // The block cache ends with the extraction; the deferred thumbnail read is exact.
+        let ahead = SparseFile(size: 16 * 1024 * 1024, regions: [(0, writer.data), (thumbnailOffset, thumbnail)])
+        let lazy = try await EXIFKit.read(from: ahead)
+        #expect(await ahead.reads == [0 ..< 65536])
+        #expect(try await lazy.thumbnailData == thumbnail)
+        #expect(await ahead.reads.last == thumbnailOffset ..< thumbnailOffset + UInt64(thumbnail.count))
     }
 
     @Test func largeISOBMFFMediaIsSkippedIncludingExtendedSizes() async throws {
@@ -357,8 +374,11 @@ extension HandleTests {
             regions: [(0, ftyp + large.data), (end, moov)],
             allowed: [0 ..< UInt64(ftyp.count + large.count), end ..< end + UInt64(moov.count)]
         )
-        #expect(try await EXIFKit.read(from: sparse, format: .cr3).make == "Range Camera")
+        #expect(try await EXIFKit.read(from: sparse, format: .cr3, options: Self.exact).make == "Range Camera")
         #expect(await sparse.transferred < 4096)
+        let ahead = SparseFile(size: end + UInt64(moov.count), regions: [(0, ftyp + large.data), (end, moov)])
+        #expect(try await EXIFKit.read(from: ahead, format: .cr3).make == "Range Camera")
+        #expect(await ahead.reads.count == 2)
         #expect(meta.fileOffset < mdat.fileOffset)
     }
 
@@ -405,7 +425,7 @@ extension HandleTests {
             }
 
             func read(at offset: UInt64, count: Int) async throws -> Data {
-                if offset > 16 {
+                if offset + UInt64(count) > 16 {
                     throw CocoaError(.fileReadUnknown)
                 }
                 return data.subdata(in: Int(offset) ..< Int(offset) + count)
@@ -422,7 +442,8 @@ extension HandleTests {
         await #expect(throws: CocoaError.self) { try await EXIFKit.read(from: Failing()) }
         await #expect(throws: EXIFError.self) {
             try await EXIFKit.read(
-                from: TIFFSerializer.encode(Self.metadata()), options: ReadOptions(maximumReadOperations: 1)
+                from: TIFFSerializer.encode(Self.metadata()),
+                options: ReadOptions(maximumReadOperations: 1, readAheadBytes: 0)
             )
         }
         var byteReader = ByteReader(data: Data([0]))

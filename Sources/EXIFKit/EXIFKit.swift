@@ -151,7 +151,9 @@ public enum EXIFKit {
         } else {
             detected = try await HandleParser.detect(file)
         }
-        return try await HandleParser.read(file, format: detected)
+        let structure = try await HandleParser.read(file, format: detected)
+        await reader.finish()
+        return structure
     }
 
     /// In-memory convenience using the same parser as local and remote sources.
