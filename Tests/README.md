@@ -11,6 +11,10 @@ Run `swift test`. The library is checked with synthetic containers, sparse multi
 
 The saved references run on every supported test platform, without requiring exiv2. They check all EXIF tags, deferred thumbnail extraction, TIFF serialization, and agreement between memory, local and HTTP sources. Reading metadata transfers less than 4 KiB; fetching the thumbnail transfers its 6924 bytes separately.
 
+## Local RAW samples
+
+`RAWThumbnailTests` use RAW files placed in `EXIFKitTests/Fixtures/RAW`. They are too large for git (the folder is ignored), and the tests are skipped when it is empty or missing. Every file there is checked: after `setThumbnail`, the new thumbnail must read back, every IFD0/EXIF/GPS tag must be unchanged, and the only bytes that may differ from the original are the IFD0 and IFD1 tables and the zeroed previous thumbnail. The current set is Canon5DMk2.cr2, Canon5DMk3-AdobeConverted.DNG, NikonD300.NEF, SonyAlpha7Mk3.ARW and iPhone14Pro.DNG; samples are available under CC0 from [raw.pixls.us](https://raw.pixls.us).
+
 ## Edits and preservation
 
 The tests never run exiv2 or exiftool; the tools only extract reference data saved in `Fixtures`. `NikonD90.exiv2-edited.jpg` (headers only, no image scan) was edited by exiv2 (Artist, Orientation, ISO), with its tags saved in `NikonD90.exiv2-edited.txt`. `ReferenceEditTests` check that EXIFKit reads it identically, that library edits (including new GPS tags) persist, that unchanged tags keep their counts, and that EXIF removal leaves the compressed JPEG scan and every non-EXIF segment (XMP/IPTC) byte for byte intact. Only temporary copies are edited.

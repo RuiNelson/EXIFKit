@@ -146,6 +146,9 @@ enum EditPlanner {
         _ structure: TIFFStructure?, stripping: Bool, file: FileRegion,
         format: ImageFormat
     ) async throws -> [FileEdit] {
+        if structure?.thumbnailEdited == true, format == .cr3 {
+            throw EXIFError.writeFailed("Replacing the thumbnail is unsupported for \(format.rawValue.uppercased())")
+        }
         switch format {
         case .jpeg:
             return try await jpeg(file, tiff: structure, stripping: stripping)

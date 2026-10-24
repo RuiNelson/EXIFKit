@@ -66,6 +66,7 @@ Write to a separate destination implementing `AbstractFileHandle`. Unchanged dat
 var metadata = try await EXIFKit.read(from: source)
 metadata.setGPSCoordinates(latitude: 38.7223, longitude: -9.1393)
 metadata.ifd0.set(tagID: Tag.artist, value: .ascii("Photographer"))
+try metadata.setThumbnail(thumbnailJPEG) // or nil to remove it
 
 let destination = try LocalFileHandle(url: outputURL, createIfNeeded: true)
 try await EXIFKit.write(metadata, from: source, to: destination)
@@ -103,6 +104,7 @@ Format constraints:
 - JPEG XL uses the container's top-level `Exif` box, which is replaced at any size (boxes hold no absolute offsets); a missing box is inserted after `ftyp`. Brotli-compressed (`brob`) Exif boxes cannot be read but are replaced or removed on write. Bare codestreams have no metadata container and are rejected. `strip` removes the box.
 - CR3 metadata must fit in its existing CMT boxes. Image offsets are preserved; adding missing CMT boxes is unsupported. `strip` replaces CMT1–CMT4 with empty TIFF metadata.
 - RAF edits preserve the embedded JPEG and update following CFA offsets when it grows.
+- `setThumbnail` stores a JPEG thumbnail in IFD1, creating it if needed. In TIFF-based files the new thumbnail is appended and the previous one zeroed; an existing IFD1 must already be a JPEG thumbnail (as in CR2 and ARW), otherwise IFD1 is added after a lone IFD0 (as in NEF and DNG). Removal is limited to TIFF and DNG, since RAW readers may locate later IFDs by position. CR3 rejects the write.
 
 Removal affects the metadata structures supported by this library; it does not remove unrelated XMP/IPTC or guarantee erasure of historical, unreferenced data left by earlier editors. MakerNotes are opaque bytes, with no vendor-specific decoding or relocation of their internal offsets.
 

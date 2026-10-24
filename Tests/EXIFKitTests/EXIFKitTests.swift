@@ -896,6 +896,102 @@ struct EXIFKitTests {
         #expect(interop.value(for: 0x0001)?.stringValue == "R98")
     }
 
+    @Test func setThumbnailReplacesExistingThumbnail() async throws {
+        let original = Data([0xFF, 0xD8]) + Data(repeating: 0x5A, count: 300) + Data([0xFF, 0xD9])
+        let replacement = Data([0xFF, 0xD8]) + Data(repeating: 0xA5, count: 1000) + Data([0xFF, 0xD9])
+        let jpeg = buildJPEG(exif: buildCameraTIFF(thumbnail: original))
+        var structure = try await EXIFKit.read(from: jpeg)
+        try structure.setThumbnail(replacement)
+        #expect(try await structure.thumbnailData == replacement)
+
+        let rewritten = try await EXIFKit.read(from: await EXIFKit.write(structure, to: jpeg))
+        #expect(try await rewritten.thumbnailData == replacement)
+        #expect(rewritten.ifd1?.value(for: Tag.jpegInterchangeFormatLength)?.uint32Value == 1004)
+        #expect(rewritten.ifd1?.value(for: Tag.compression) == .short(6))
+        #expect(rewritten.interopIFD?.value(for: 0x0001)?.stringValue == "R98")
+    }
+
+    @Test func setThumbnailCreatesIFD1() async throws {
+        let thumbnail = Data([0xFF, 0xD8]) + Data(repeating: 0x11, count: 64) + Data([0xFF, 0xD9])
+        var structure = TIFFStructure(byteOrder: .bigEndian)
+        structure.ifd0.set(tagID: Tag.make, value: .ascii("Sony"))
+        try structure.setThumbnail(thumbnail)
+
+        for source in [buildMinimalJPEG(), buildJPEG(exif: buildCameraTIFF(thumbnail: Data()))] {
+            let rewritten = try await EXIFKit.read(from: await EXIFKit.write(structure, to: source))
+            #expect(rewritten.make == "Sony")
+            #expect(try await rewritten.thumbnailData == thumbnail)
+            let ifd1 = try #require(rewritten.ifd1)
+            #expect(ifd1.value(for: Tag.compression) == .short(6))
+            #expect(ifd1.value(for: Tag.xResolution) == .rational(URational(numerator: 72, denominator: 1)))
+            #expect(ifd1.value(for: Tag.resolutionUnit) == .short(2))
+        }
+    }
+
+    @Test func setThumbnailNilRemovesThumbnail() async throws {
+        let thumbnail = Data([0xFF, 0xD8]) + Data(repeating: 0x5A, count: 300) + Data([0xFF, 0xD9])
+        let jpeg = buildJPEG(exif: buildCameraTIFF(thumbnail: thumbnail))
+        var structure = try await EXIFKit.read(from: jpeg)
+        try structure.setThumbnail(nil)
+        #expect(try await structure.thumbnailData == nil)
+
+        let written = try await EXIFKit.write(structure, to: jpeg)
+        let rewritten = try await EXIFKit.read(from: written)
+        #expect(rewritten.ifd1 == nil)
+        #expect(try await rewritten.thumbnailData == nil)
+        #expect(rewritten.make == "Canon")
+        #expect(written.count < jpeg.count - thumbnail.count)
+    }
+
+    @Test func setThumbnailRejectsNonJPEGDataAndCR3() async throws {
+        var structure = TIFFStructure(byteOrder: .littleEndian)
+        #expect(throws: EXIFError.self) { try structure.setThumbnail(Data([0x89, 0x50, 0x4E, 0x47])) }
+        #expect(structure.ifd1 == nil)
+
+        var ifd0 = IFD()
+        ifd0.set(tagID: Tag.make, value: .ascii("Canon"))
+        let cr3 = buildMinimalCR3(ifd0: ifd0, exif: IFD())
+        var metadata = try await EXIFKit.read(from: cr3)
+        try metadata.setThumbnail(Data([0xFF, 0xD8, 0xFF, 0xD9]))
+        await #expect(throws: EXIFError.self) { try await EXIFKit.write(metadata, to: cr3) }
+    }
+
+    @Test func setThumbnailAddsAndRemovesTIFFThumbnail() async throws {
+        var structure = TIFFStructure(byteOrder: .bigEndian)
+        structure.ifd0.set(tagID: Tag.make, value: .ascii("Leica"))
+        structure.exifIFD = IFD()
+        structure.exifIFD?.set(tagID: Tag.isoSpeedRatings, value: .short(200))
+        let tiff = TIFFSerializer.encode(structure)
+        // Odd length: the IFD1 table appended after it must stay word-aligned
+        let thumbnail = Data([0xFF, 0xD8]) + Data(repeating: 0x33, count: 101) + Data([0xFF, 0xD9])
+
+        var metadata = try await EXIFKit.read(from: tiff)
+        try metadata.setThumbnail(thumbnail)
+        let added = try await EXIFKit.write(metadata, to: tiff)
+        var reparsed = try await EXIFKit.read(from: added)
+        #expect(try await reparsed.thumbnailData == thumbnail)
+        #expect(reparsed.make == "Leica")
+        #expect(reparsed.iso == 200)
+        #expect(reparsed.ifd0.nextIFDOffset != 0)
+        #expect(reparsed.ifd0.nextIFDOffset % 2 == 0)
+
+        try reparsed.setThumbnail(nil)
+        let removed = try await EXIFKit.read(from: await EXIFKit.write(reparsed, to: added))
+        #expect(removed.ifd1 == nil)
+        #expect(try await removed.thumbnailData == nil)
+        #expect(removed.iso == 200)
+    }
+
+    @Test func setThumbnailRejectsTIFFWhoseIFD1IsAnotherImage() async throws {
+        var structure = TIFFStructure(byteOrder: .littleEndian)
+        structure.ifd1 = IFD()
+        structure.ifd1?.set(tagID: Tag.stripOffsets, value: .long(8))
+        let tiff = TIFFSerializer.encode(structure)
+        var metadata = try await EXIFKit.read(from: tiff)
+        try metadata.setThumbnail(Data([0xFF, 0xD8, 0xFF, 0xD9]))
+        await #expect(throws: EXIFError.self) { try await EXIFKit.write(metadata, to: tiff) }
+    }
+
     @Test func jPEGWriteRejectsOversizedEXIF() async throws {
         var structure = TIFFStructure(byteOrder: .littleEndian)
         structure.exifIFD = IFD()
