@@ -17,6 +17,7 @@ public enum ImageFormat: String, CaseIterable, Sendable {
     case rw2 // Panasonic / Lumix (TIFF variant)
     case pef // Pentax (TIFF-based)
     case heif // HEIF / HEIC (ISOBMFF-based)
+    case jxl // JPEG XL container (ISOBMFF-style boxes)
 
     /// Whether this format is TIFF-based (uses standard IFD structures)
     public var isTIFFBased: Bool {
@@ -31,7 +32,7 @@ public enum ImageFormat: String, CaseIterable, Sendable {
     /// Whether this format uses ISOBMFF container
     public var isISOBMFF: Bool {
         switch self {
-        case .cr3, .heif:
+        case .cr3, .heif, .jxl:
             return true
         default:
             return false
@@ -46,6 +47,9 @@ public enum ImageFormat: String, CaseIterable, Sendable {
         }
         if head.count >= 8, data.prefix(8) == Data([137, 80, 78, 71, 13, 10, 26, 10]) {
             return .png
+        }
+        if JXLContainer.isJXL(data) {
+            return .jxl
         }
         if RAFContainer.isRAF(data) {
             return .raf
@@ -94,6 +98,7 @@ public enum ImageFormat: String, CaseIterable, Sendable {
         case "srw": return .tiff
         case "heif", "heic": return .heif
         case "avif": return .heif
+        case "jxl": return .jxl
         default: return nil
         }
     }
@@ -113,6 +118,7 @@ public enum ImageFormat: String, CaseIterable, Sendable {
 /// - **Panasonic/Lumix**: RW2 (TIFF variant)
 /// - **Pentax**: PEF (TIFF-based)
 /// - **Apple/Modern**: HEIF/HEIC (ISOBMFF-based)
+/// - **JPEG XL**: container files with an `Exif` box
 ///
 /// Usage:
 /// ```swift

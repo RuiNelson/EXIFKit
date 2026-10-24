@@ -1,7 +1,6 @@
+@testable import EXIFKit
 import Foundation
 import Testing
-
-@testable import EXIFKit
 
 private actor MeasuredLocalFile: AbstractFileHandle {
     private let source: LocalFileHandle

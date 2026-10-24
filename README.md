@@ -2,7 +2,7 @@
 
 A Swift library for reading, writing and removing EXIF metadata through random-access file handles. Read metadata from memory, local files, HTTP servers or your own storage backend without loading the image into memory. The library has no external runtime dependencies.
 
-Supports JPEG, PNG, TIFF, DNG, CR2, CR3, NEF, ARW, RAF, ORF, RW2, PEF and HEIF/HEIC/AVIF. Requires Swift 6.3+, macOS 12+, iOS/tvOS 15+ or watchOS 8+.
+Supports JPEG, PNG, TIFF, DNG, CR2, CR3, NEF, ARW, RAF, ORF, RW2, PEF and HEIF/HEIC/AVIF and JPEG XL. Requires Swift 6.3+, macOS 12+, iOS/tvOS 15+ or watchOS 8+.
 
 ## Installation
 
@@ -100,6 +100,7 @@ Format constraints:
 - JPEG EXIF must fit in a single APP1 segment. PNG stores it in an `eXIf` chunk.
 - TIFF and TIFF-based RAW preserve image offsets and reuse unchanged out-of-line values, including MakerNotes. Their byte order cannot be changed during an edit, and writing requires 32-bit file offsets. `strip` removes and zeros the referenced EXIF/GPS/interoperability directories; IFD0, thumbnails and image layout tags are retained.
 - HEIF uses declared Exif items and their `iloc` extents, including fragmented items and `idat` storage. Larger replacements are appended in a new `mdat`, updating the index and clearing the previous item. There is no brute-force scan through image data for unindexed EXIF, and creating a missing Exif item is unsupported.
+- JPEG XL uses the container's top-level `Exif` box, which is replaced at any size (boxes hold no absolute offsets); a missing box is inserted after `ftyp`. Brotli-compressed (`brob`) Exif boxes cannot be read but are replaced or removed on write. Bare codestreams have no metadata container and are rejected. `strip` removes the box.
 - CR3 metadata must fit in its existing CMT boxes. Image offsets are preserved; adding missing CMT boxes is unsupported. `strip` replaces CMT1–CMT4 with empty TIFF metadata.
 - RAF edits preserve the embedded JPEG and update following CFA offsets when it grows.
 

@@ -182,6 +182,7 @@ enum HandleParser {
         case .raf: return try await read(raf(file), format: .jpeg)
         case .cr3: return try await cr3(file)
         case .heif: return try await tiff(heif(file).tiff)
+        case .jxl: return try await tiff(jxlTIFF(file))
         default: return try await tiff(file, raw: format != .tiff && format != .dng)
         }
     }

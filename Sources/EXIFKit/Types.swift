@@ -14,6 +14,7 @@ public enum EXIFError: Error, LocalizedError, CustomStringConvertible {
     case invalidPNG(String)
     case invalidHEIF(String)
     case invalidCR3(String)
+    case invalidJXL(String)
     case invalidRAF(String)
     case invalidRAW(String)
     case corruptedIFD(String)
@@ -44,6 +45,8 @@ public enum EXIFError: Error, LocalizedError, CustomStringConvertible {
             return "Invalid HEIF/HEIC: \(detail)"
         case let .invalidCR3(detail):
             return "Invalid CR3: \(detail)"
+        case let .invalidJXL(detail):
+            return "Invalid JPEG XL: \(detail)"
         case let .invalidRAF(detail):
             return "Invalid RAF: \(detail)"
         case let .invalidRAW(detail):

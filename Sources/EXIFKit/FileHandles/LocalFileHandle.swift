@@ -133,11 +133,13 @@ private actor LocalFileStorage {
     }
 
     private func openForWriting() throws -> FileHandle {
-        if writable, let file { return file }
+        if writable, let file {
+            return file
+        }
         try file?.close()
         let handle: FileHandle
         if createIfNeeded {
-            handle = FileHandle(fileDescriptor: try Self.openCreating(url), closeOnDealloc: true)
+            handle = try FileHandle(fileDescriptor: Self.openCreating(url), closeOnDealloc: true)
         } else {
             handle = try FileHandle(forUpdating: url)
         }

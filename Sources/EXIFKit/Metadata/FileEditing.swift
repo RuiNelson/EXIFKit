@@ -155,6 +155,8 @@ enum EditPlanner {
             return try await raf(file, structure: structure, stripping: stripping)
         case .heif:
             return try await heif(file, structure: structure)
+        case .jxl:
+            return try await jxl(file, structure: structure)
         case .cr3:
             return try await cr3(file, structure: structure)
         default:

@@ -1,7 +1,6 @@
+@testable import EXIFKit
 import Foundation
 import Testing
-
-@testable import EXIFKit
 
 /// Values are untranslated exiv2 output, so rationals and undefined bytes retain their exact representation.
 struct EXIFOracleTag: Equatable, Sendable {
@@ -11,7 +10,9 @@ struct EXIFOracleTag: Equatable, Sendable {
     let count: UInt32
     let value: String
 
-    var group: String { String(key.split(separator: ".")[1]) }
+    var group: String {
+        String(key.split(separator: ".")[1])
+    }
 
     static func parse(_ data: Data) throws -> [EXIFOracleTag] {
         try String(decoding: data, as: UTF8.self).split(separator: "\n").filter { !$0.hasPrefix("#") }.map { line in
@@ -26,11 +27,11 @@ struct EXIFOracleTag: Equatable, Sendable {
 
     static func assertMatches(_ metadata: TIFFStructure, tags: [EXIFOracleTag]) throws {
         let directories: [String: IFD?] = ["Image": metadata.ifd0, "Photo": metadata.exifIFD,
-                                         "Thumbnail": metadata.ifd1, "GPSInfo": metadata.gpsIFD, "Iop": metadata.interopIFD]
+                                           "Thumbnail": metadata.ifd1, "GPSInfo": metadata.gpsIFD, "Iop": metadata.interopIFD]
         let types: [EXIFDataType: String] = [.ascii: "Ascii", .byte: "Byte", .short: "Short", .long: "Long",
-                                          .rational: "Rational", .undefined: "Undefined", .sbyte: "SByte",
-                                          .sshort: "SShort", .slong: "SLong", .srational: "SRational",
-                                          .float: "Float", .double: "Double"]
+                                             .rational: "Rational", .undefined: "Undefined", .sbyte: "SByte",
+                                             .sshort: "SShort", .slong: "SLong", .srational: "SRational",
+                                             .float: "Float", .double: "Double"]
         #expect(directories.values.compactMap { $0 }.reduce(0) { $0 + $1.entries.count } == tags.count)
         for tag in tags {
             let directory = try #require(directories[tag.group] ?? nil, "Missing directory for \(tag.key)")
@@ -61,9 +62,11 @@ enum NikonFixture {
     static func url(_ name: String = "NikonD90", extension suffix: String = "jpg") throws -> URL {
         try #require(Bundle.module.url(forResource: name, withExtension: suffix, subdirectory: "Fixtures"))
     }
+
     static func tags() throws -> [EXIFOracleTag] {
         try EXIFOracleTag.parse(Data(contentsOf: url("NikonD90.exiv2", extension: "txt")))
     }
+
     static func thumbnail() throws -> Data {
         try Data(contentsOf: url("NikonD90.exiv2-thumbnail"))
     }

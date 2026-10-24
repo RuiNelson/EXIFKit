@@ -45,7 +45,9 @@ public actor HTTPFileHandle: AbstractFileHandle {
         get async throws { try await operations.run { await self.currentSize() } }
     }
 
-    private func currentSize() -> UInt64 { length }
+    private func currentSize() -> UInt64 {
+        length
+    }
 
     public func read(at offset: UInt64, count: Int) async throws -> Data {
         try await operations.run { try await self.readIsolated(at: offset, count: count) }
@@ -70,7 +72,9 @@ public actor HTTPFileHandle: AbstractFileHandle {
     }
 
     private func writeIsolated(_ data: Data, at offset: UInt64) async throws {
-        if data.isEmpty { return }
+        if data.isEmpty {
+            return
+        }
         let (end, overflow) = offset.addingReportingOverflow(UInt64(data.count))
         guard !overflow else { throw FileAccessError.invalidRange(offset: offset, count: data.count, size: length) }
         let oldLength = length
@@ -79,7 +83,9 @@ public actor HTTPFileHandle: AbstractFileHandle {
         let changed = min(offset, oldLength) ..< end
         loaded = merging(loaded, changed)
         dirty = merging(dirty, changed)
-        if length != oldLength { resized = true }
+        if length != oldLength {
+            resized = true
+        }
     }
 
     private func truncateIsolated(to size: UInt64) async throws {
@@ -92,7 +98,9 @@ public actor HTTPFileHandle: AbstractFileHandle {
             loaded = merging(loaded, oldLength ..< size)
             dirty = merging(dirty, oldLength ..< size)
         }
-        if size != oldLength { resized = true }
+        if size != oldLength {
+            resized = true
+        }
     }
 
     /// Download only uncached gaps. The sparse staging file never allocates the complete resource in RAM.
@@ -141,7 +149,7 @@ public actor HTTPFileHandle: AbstractFileHandle {
         }
         if usePUT {
             try await load(0 ..< length)
-            try await accept(try await upload(method: "PUT", range: 0 ..< length))
+            try await accept(await upload(method: "PUT", range: 0 ..< length))
         }
         dirty = []
         resized = false
@@ -175,7 +183,9 @@ public actor HTTPFileHandle: AbstractFileHandle {
             temporary = true
         }
         defer {
-            if temporary { try? FileManager.default.removeItem(at: bodyURL) }
+            if temporary {
+                try? FileManager.default.removeItem(at: bodyURL)
+            }
         }
         if temporary {
             let body = try LocalFileHandle(url: bodyURL, createIfNeeded: true)
@@ -266,13 +276,17 @@ struct HTTPRangeResponse: Sendable {
 
 func invalidHTTPResponse(_ response: URLResponse, _ detail: String) -> URLError {
     var info: [String: Any] = [NSLocalizedDescriptionKey: detail, "HTTPURLResponse": response]
-    if let url = response.url { info[NSURLErrorFailingURLErrorKey] = url }
+    if let url = response.url {
+        info[NSURLErrorFailingURLErrorKey] = url
+    }
     return URLError(.badServerResponse, userInfo: info)
 }
 
 func validateHTTPRange(_ response: URLResponse, offset: UInt64, count: Int, size: UInt64?, validator: HTTPValidator?) throws -> UInt64 {
     guard let http = response as? HTTPURLResponse else { throw invalidHTTPResponse(response, "Expected HTTP response") }
-    if http.statusCode == 416, size == nil, http.value(forHTTPHeaderField: "Content-Range") == "bytes */0" { return 0 }
+    if http.statusCode == 416, size == nil, http.value(forHTTPHeaderField: "Content-Range") == "bytes */0" {
+        return 0
+    }
     guard http.statusCode == 206 else { throw invalidHTTPResponse(http, "Expected HTTP 206, received \(http.statusCode)") }
     guard http.value(forHTTPHeaderField: "Content-Encoding").map({ $0 == "identity" }) ?? true else {
         throw invalidHTTPResponse(http, "Encoded byte range")
@@ -285,7 +299,9 @@ func validateHTTPRange(_ response: URLResponse, offset: UInt64, count: Int, size
           let start = UInt64(endpoints[0]), let end = UInt64(endpoints[1]), let total = UInt64(bounds[1]),
           start == offset, end == offset + UInt64(count) - 1, end < total
     else { throw invalidHTTPResponse(http, "Invalid Content-Range: \(field)") }
-    if let size, total != size { throw invalidHTTPResponse(http, "Resource size changed") }
+    if let size, total != size {
+        throw invalidHTTPResponse(http, "Resource size changed")
+    }
     if let validator, http.value(forHTTPHeaderField: validator.header) != validator.value {
         throw invalidHTTPResponse(http, "Resource validator changed")
     }
