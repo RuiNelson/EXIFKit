@@ -326,27 +326,3 @@ func httpRangeURLRequest(url: URL, offset: UInt64, count: Int, validator: HTTPVa
     }
     return request
 }
-
-#if !canImport(FoundationNetworking)
-    enum HTTPRangeRequest {
-        static func fetch(
-            _ session: HTTPSession, url: URL, offset: UInt64, count: Int, size: UInt64?, validator: HTTPValidator?
-        ) async throws -> HTTPRangeResponse {
-            let request = httpRangeURLRequest(url: url, offset: offset, count: count, validator: validator)
-            let (stream, response) = try await session.session.bytes(for: request)
-            defer { stream.task.cancel() }
-            let length = try validateHTTPRange(response, offset: offset, count: count, size: size, validator: validator)
-            if length == 0 {
-                return HTTPRangeResponse(data: Data(), size: 0, validator: (response as? HTTPURLResponse).flatMap(HTTPValidator.init), response: response)
-            }
-            var bytes = Data()
-            bytes.reserveCapacity(count)
-            for try await byte in stream {
-                guard bytes.count < count else { throw invalidHTTPResponse(response, "Range body exceeds requested length") }
-                bytes.append(byte)
-            }
-            guard bytes.count == count else { throw FileAccessError.shortRead(expected: count, actual: bytes.count) }
-            return HTTPRangeResponse(data: bytes, size: length, validator: (response as? HTTPURLResponse).flatMap(HTTPValidator.init), response: response)
-        }
-    }
-#endif

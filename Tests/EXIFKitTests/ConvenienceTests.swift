@@ -3,7 +3,7 @@ import Foundation
 import Testing
 
 #if canImport(CoreLocation)
-import CoreLocation
+    import CoreLocation
 #endif
 
 private func read(_ raw: String) async throws -> TIFFStructure {
@@ -37,7 +37,7 @@ struct ConvenienceTests {
         #expect(s.orientationTyped == nil)
         #expect(s.colorSpaceTyped == nil)
         #if canImport(CoreLocation)
-        #expect(s.location == nil)
+            #expect(s.location == nil)
         #endif
     }
 
@@ -98,51 +98,51 @@ struct ConvenienceTests {
     }
 
     #if canImport(CoreLocation)
-    @Test(.enabled(if: RAWFixture.available.contains("iPhone14Pro.DNG")))
-    func iPhoneLocation() async throws {
-        let s = try await read("iPhone14Pro.DNG")
-        let location = try #require(s.location)
-        #expect(abs(location.coordinate.latitude - 41.17496111) < 1e-6)
-        #expect(abs(location.coordinate.longitude + 8.59029167) < 1e-6)
-        #expect(abs(location.altitude - 137.2329) < 1e-3)
-        #expect(location.verticalAccuracy >= 0)
-    }
+        @Test(.enabled(if: RAWFixture.available.contains("iPhone14Pro.DNG")))
+        func iPhoneLocation() async throws {
+            let s = try await read("iPhone14Pro.DNG")
+            let location = try #require(s.location)
+            #expect(abs(location.coordinate.latitude - 41.17496111) < 1e-6)
+            #expect(abs(location.coordinate.longitude + 8.59029167) < 1e-6)
+            #expect(abs(location.altitude - 137.2329) < 1e-3)
+            #expect(location.verticalAccuracy >= 0)
+        }
 
-    @Test(.enabled(if: RAWFixture.available.contains("iPhone14Pro.DNG")))
-    func locationSurvivesRoundTrip() async throws {
-        var s = try await read("iPhone14Pro.DNG")
-        let original = try #require(s.location)
-        s.setLocation(CLLocation(
-            coordinate: CLLocationCoordinate2D(latitude: -33.8688, longitude: 151.2093),
-            altitude: -12.5, horizontalAccuracy: 5, verticalAccuracy: 3,
-            course: 270, speed: 10, timestamp: original.timestamp
-        ))
-        let result = try #require(s.location)
-        #expect(abs(result.coordinate.latitude + 33.8688) < 1e-4)
-        #expect(abs(result.coordinate.longitude - 151.2093) < 1e-4)
-        #expect(abs(result.altitude + 12.5) < 1e-3)
-        #expect(result.horizontalAccuracy == 5)
-        #expect(result.course == 270)
-        #expect(abs(result.speed - 10) < 0.01)
-    }
+        @Test(.enabled(if: RAWFixture.available.contains("iPhone14Pro.DNG")))
+        func locationSurvivesRoundTrip() async throws {
+            var s = try await read("iPhone14Pro.DNG")
+            let original = try #require(s.location)
+            s.setLocation(CLLocation(
+                coordinate: CLLocationCoordinate2D(latitude: -33.8688, longitude: 151.2093),
+                altitude: -12.5, horizontalAccuracy: 5, verticalAccuracy: 3,
+                course: 270, speed: 10, timestamp: original.timestamp
+            ))
+            let result = try #require(s.location)
+            #expect(abs(result.coordinate.latitude + 33.8688) < 1e-4)
+            #expect(abs(result.coordinate.longitude - 151.2093) < 1e-4)
+            #expect(abs(result.altitude + 12.5) < 1e-3)
+            #expect(result.horizontalAccuracy == 5)
+            #expect(result.course == 270)
+            #expect(abs(result.speed - 10) < 0.01)
+        }
 
-    @Test func setLocationOnNikonAddsGPSAndRemovesInvalidValues() async throws {
-        var s = try await readNikon()
-        s.setLocation(CLLocation(
-            coordinate: CLLocationCoordinate2D(latitude: 10, longitude: 20),
-            altitude: 5, horizontalAccuracy: 5, verticalAccuracy: 3, course: 90, speed: 4, timestamp: Date()
-        ))
-        #expect(s.location != nil)
-        s.setLocation(CLLocation(
-            coordinate: CLLocationCoordinate2D(latitude: 10, longitude: 20),
-            altitude: 0, horizontalAccuracy: -1, verticalAccuracy: -1, course: -1, speed: -1, timestamp: Date()
-        ))
-        let ifd = try #require(s.gpsIFD)
-        #expect(ifd.value(for: Tag.gpsSpeed) == nil)
-        #expect(ifd.value(for: Tag.gpsTrack) == nil)
-        #expect(ifd.value(for: Tag.gpsHPositioningError) == nil)
-        #expect(try #require(s.location).speed < 0)
-    }
+        @Test func setLocationOnNikonAddsGPSAndRemovesInvalidValues() async throws {
+            var s = try await readNikon()
+            s.setLocation(CLLocation(
+                coordinate: CLLocationCoordinate2D(latitude: 10, longitude: 20),
+                altitude: 5, horizontalAccuracy: 5, verticalAccuracy: 3, course: 90, speed: 4, timestamp: Date()
+            ))
+            #expect(s.location != nil)
+            s.setLocation(CLLocation(
+                coordinate: CLLocationCoordinate2D(latitude: 10, longitude: 20),
+                altitude: 0, horizontalAccuracy: -1, verticalAccuracy: -1, course: -1, speed: -1, timestamp: Date()
+            ))
+            let ifd = try #require(s.gpsIFD)
+            #expect(ifd.value(for: Tag.gpsSpeed) == nil)
+            #expect(ifd.value(for: Tag.gpsTrack) == nil)
+            #expect(ifd.value(for: Tag.gpsHPositioningError) == nil)
+            #expect(try #require(s.location).speed < 0)
+        }
     #endif
 }
 
@@ -163,7 +163,9 @@ struct ValueTests {
     }
 
     @Test func orientationAndColorSpaceRawValues() {
-        for raw in UInt16(1) ... 8 { #expect(ImageOrientation(rawValue: raw) != nil) }
+        for raw in UInt16(1) ... 8 {
+            #expect(ImageOrientation(rawValue: raw) != nil)
+        }
         #expect(ImageOrientation(rawValue: 0) == nil)
         #expect(ImageOrientation(rawValue: 9) == nil)
         #expect(ImageColorSpace(rawValue: 1) == .sRGB)
