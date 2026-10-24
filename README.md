@@ -69,14 +69,16 @@ metadata.setGPSCoordinates(latitude: 38.7223, longitude: -9.1393)
 metadata.ifd0.set(tagID: Tag.artist, value: .ascii("Photographer"))
 try metadata.setThumbnail(thumbnailJPEG) // or nil to remove it
 
-let destination = try LocalFileHandle(url: outputURL, createIfNeeded: true)
+FileManager.default.createFile(atPath: outputURL.path, contents: nil)
+let destination = try LocalFileHandle(url: outputURL)
 try await EXIFKit.write(metadata, from: source, to: destination)
 
-let clean = try LocalFileHandle(url: cleanURL, createIfNeeded: true)
+FileManager.default.createFile(atPath: cleanURL.path, contents: nil)
+let clean = try LocalFileHandle(url: cleanURL)
 try await EXIFKit.strip(from: source, to: clean)
 ```
 
-`LocalFileHandle(url:createIfNeeded: true)` creates a missing file without truncating an existing one; by default the file must exist. Each write/strip validates its edit plan before truncating the destination. Source and destination must refer to different underlying storage; identical handles and local files sharing an inode are rejected. Custom wrappers must also respect this requirement. An I/O failure or cancellation can leave a partial destination. To replace an existing file, write to a temporary file and rename it after success.
+`LocalFileHandle` opens an existing file; it never creates one, so create the destination first as shown above. Each write/strip validates its edit plan before truncating the destination. Source and destination must refer to different underlying storage; identical handles and local files sharing an inode are rejected. Custom wrappers must also respect this requirement. An I/O failure or cancellation can leave a partial destination. To replace an existing file, write to a temporary file and rename it after success.
 
 In-memory convenience overloads use the same streaming writer:
 
@@ -131,7 +133,7 @@ Offsets are absolute and reads must return exactly the requested number of bytes
 | Local files | `LocalFileHandle` |
 | HTTP | `HTTPFileHandle` |
 
-Mutable memory and local I/O are actor-isolated; HTTP serialises complete operations across suspension points. `InMemoryFileHandle.data` is an asynchronous snapshot.
+Mutable memory and local I/O are actor-isolated; HTTP serialises complete operations across suspension points.
 
 Native filesystem, URLSession and consumer backend errors propagate unchanged. `FileAccessError` only describes invalid ranges and incomplete reads. EXIF parsing errors and metadata resource limits use `EXIFError`. HTTP response validation uses `URLError.badServerResponse`, preserving the `HTTPURLResponse` in the error's `userInfo["HTTPURLResponse"]`.
 

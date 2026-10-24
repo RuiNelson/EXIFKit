@@ -188,7 +188,8 @@ struct HandleTests {
         #expect(await memory.data == Data([0, 1, 2]))
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: url) }
-        let local = try LocalFileHandle(url: url, createIfNeeded: true)
+        try Data().write(to: url)
+        let local = try LocalFileHandle(url: url)
         try await local.write(data, at: 0)
         #expect(try await local.read(at: 2, count: 2) == Data([2, 3]))
         let readOnly = try LocalFileHandle(url: url)
@@ -456,7 +457,8 @@ extension HandleTests {
     @Test func localSparseEightGigabyteFile() async throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".tiff")
         defer { try? FileManager.default.removeItem(at: url) }
-        let local = try LocalFileHandle(url: url, createIfNeeded: true)
+        try Data().write(to: url)
+        let local = try LocalFileHandle(url: url)
         try await local.write(TIFFSerializer.encode(Self.metadata()), at: 0)
         try await local.truncate(to: 8 * 1024 * 1024 * 1024)
         let metadata = try await EXIFKit.read(from: url)

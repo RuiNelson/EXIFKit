@@ -53,7 +53,9 @@ struct ReferenceEditTests {
     private func temporaryURL(_ name: String = "out.jpg") throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.appendingPathComponent(name)
+        let file = directory.appendingPathComponent(name)
+        try Data().write(to: file)
+        return file
     }
 
     @Test
@@ -72,7 +74,7 @@ struct ReferenceEditTests {
         metadata.ifd0.set(tagID: Tag.artist, value: .ascii("EXIFKit test"))
         metadata.exifIFD?.set(tagID: Tag.isoSpeedRatings, value: .short(800))
         metadata.setGPSCoordinates(latitude: 38.7223, longitude: -9.1393, altitude: 12.5)
-        try await EXIFKit.write(metadata, from: source, to: LocalFileHandle(url: output, createIfNeeded: true))
+        try await EXIFKit.write(metadata, from: source, to: LocalFileHandle(url: output))
         let reparsed = try await EXIFKit.read(from: output)
         #expect(reparsed.artist == "EXIFKit test")
         #expect(reparsed.iso == 800)
@@ -95,7 +97,7 @@ struct ReferenceEditTests {
         let fixture = try NikonFixture.url()
         let output = try temporaryURL()
         defer { try? FileManager.default.removeItem(at: output.deletingLastPathComponent()) }
-        try await EXIFKit.strip(from: LocalFileHandle(url: fixture), to: LocalFileHandle(url: output, createIfNeeded: true))
+        try await EXIFKit.strip(from: LocalFileHandle(url: fixture), to: LocalFileHandle(url: output))
         await #expect(throws: EXIFError.self) { try await EXIFKit.read(from: output) }
         try await Segments.assertImageAndNonEXIFSegmentsPreserved(fixture, output)
     }

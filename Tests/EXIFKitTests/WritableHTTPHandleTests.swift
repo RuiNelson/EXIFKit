@@ -244,7 +244,8 @@
             #expect(await memory.data == Data([1, 2]))
             let fileURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: fileURL) }
-            let file = try LocalFileHandle(url: fileURL, createIfNeeded: true)
+            try Data().write(to: fileURL)
+            let file = try LocalFileHandle(url: fileURL)
             try await file.write(Data(), at: UInt64.max)
             #expect(try await file.size == 0)
         }

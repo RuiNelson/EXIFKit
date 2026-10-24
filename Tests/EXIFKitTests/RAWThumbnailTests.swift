@@ -24,7 +24,9 @@ struct RAWThumbnailTests {
     private func temporaryURL(_ name: String) throws -> URL {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.appendingPathComponent(name)
+        let file = directory.appendingPathComponent(name)
+        try Data().write(to: file)
+        return file
     }
 
     /// Byte range of the IFD table at `offset`, read from the original file.
@@ -75,7 +77,7 @@ struct RAWThumbnailTests {
         var edited = metadata
         try edited.setThumbnail(thumbnail)
         try await EXIFKit.write(
-            edited, from: LocalFileHandle(url: source), to: LocalFileHandle(url: output, createIfNeeded: true)
+            edited, from: LocalFileHandle(url: source), to: LocalFileHandle(url: output)
         )
 
         let reparsed = try await EXIFKit.read(from: output)
@@ -118,7 +120,7 @@ struct RAWThumbnailTests {
         try metadata.setThumbnail(nil)
         await #expect(throws: EXIFError.self) {
             try await EXIFKit.write(
-                metadata, from: LocalFileHandle(url: source), to: LocalFileHandle(url: output, createIfNeeded: true)
+                metadata, from: LocalFileHandle(url: source), to: LocalFileHandle(url: output)
             )
         }
     }
