@@ -6,3 +6,6 @@ DerivedData/
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
+
+# Large RAW samples, kept locally (see Tests/README.md)
+Tests/EXIFKitTests/Fixtures/RAW/

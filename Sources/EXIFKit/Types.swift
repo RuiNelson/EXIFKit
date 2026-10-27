@@ -14,50 +14,55 @@ public enum EXIFError: Error, LocalizedError, CustomStringConvertible {
     case invalidPNG(String)
     case invalidHEIF(String)
     case invalidCR3(String)
+    case invalidJXL(String)
     case invalidRAF(String)
     case invalidRAW(String)
     case corruptedIFD(String)
+    case resourceLimitExceeded
     case writeFailed(String)
-    case readOnly(String)
 
     public var description: String {
         switch self {
-        case .unexpectedEndOfData(let needed, let available, let at):
+        case let .unexpectedEndOfData(needed, available, at):
             return "Unexpected end of data at offset \(at): needed \(needed) bytes, \(available) available"
-        case .invalidOffset(let offset, let dataSize):
+        case let .invalidOffset(offset, dataSize):
             return "Invalid offset \(offset) for data of size \(dataSize)"
         case .invalidTIFFHeader:
             return "Invalid TIFF header"
         case .invalidByteOrder:
             return "Invalid byte order marker (expected 'II' or 'MM')"
-        case .unsupportedFormat(let fmt):
+        case let .unsupportedFormat(fmt):
             return "Unsupported format: \(fmt)"
-        case .tagNotFound(let tag):
+        case let .tagNotFound(tag):
             return "Tag 0x\(String(tag, radix: 16, uppercase: true)) not found"
-        case .typeMismatch(let expected, let got):
+        case let .typeMismatch(expected, got):
             return "Type mismatch: expected \(expected), got \(got)"
-        case .invalidJPEG(let detail):
+        case let .invalidJPEG(detail):
             return "Invalid JPEG: \(detail)"
-        case .invalidPNG(let detail):
+        case let .invalidPNG(detail):
             return "Invalid PNG: \(detail)"
-        case .invalidHEIF(let detail):
+        case let .invalidHEIF(detail):
             return "Invalid HEIF/HEIC: \(detail)"
-        case .invalidCR3(let detail):
+        case let .invalidCR3(detail):
             return "Invalid CR3: \(detail)"
-        case .invalidRAF(let detail):
+        case let .invalidJXL(detail):
+            return "Invalid JPEG XL: \(detail)"
+        case let .invalidRAF(detail):
             return "Invalid RAF: \(detail)"
-        case .invalidRAW(let detail):
+        case let .invalidRAW(detail):
             return "Invalid RAW: \(detail)"
-        case .corruptedIFD(let detail):
+        case let .corruptedIFD(detail):
             return "Corrupted IFD: \(detail)"
-        case .writeFailed(let detail):
+        case .resourceLimitExceeded:
+            return "Metadata exceeds the configured resource limits"
+        case let .writeFailed(detail):
             return "Write failed: \(detail)"
-        case .readOnly(let detail):
-            return "Read-only operation: \(detail)"
         }
     }
 
-    public var errorDescription: String? { description }
+    public var errorDescription: String? {
+        description
+    }
 }
 
 // MARK: - Rational Number Types
@@ -83,8 +88,8 @@ public struct URational: Equatable, Hashable, CustomStringConvertible, Sendable 
 
     /// Convenience: create from a double with a given denominator precision
     public init(_ value: Double, precision: UInt32 = 10000) {
-        self.denominator = precision
-        self.numerator = UInt32(clamping: Int64((value * Double(precision)).rounded()))
+        denominator = precision
+        numerator = UInt32(clamping: Int64((value * Double(precision)).rounded()))
     }
 }
 
@@ -109,8 +114,8 @@ public struct SRational: Equatable, Hashable, CustomStringConvertible, Sendable 
 
     /// Convenience: create from a double
     public init(_ value: Double, precision: Int32 = 10000) {
-        self.denominator = precision
-        self.numerator = Int32(clamping: Int64((value * Double(precision)).rounded()))
+        denominator = precision
+        numerator = Int32(clamping: Int64((value * Double(precision)).rounded()))
     }
 }
 
@@ -119,26 +124,26 @@ public struct SRational: Equatable, Hashable, CustomStringConvertible, Sendable 
 /// The 12 data types defined by the TIFF/EXIF spec.
 /// Each IFD entry declares its type, which determines how to read the value bytes.
 public enum EXIFDataType: UInt16, CaseIterable, Sendable {
-    case byte       = 1   // UInt8
-    case ascii      = 2   // 7-bit ASCII, null-terminated
-    case short      = 3   // UInt16
-    case long       = 4   // UInt32
-    case rational   = 5   // Two UInt32s (numerator/denominator)
-    case sbyte      = 6   // Int8
-    case undefined  = 7   // Arbitrary bytes
-    case sshort     = 8   // Int16
-    case slong      = 9   // Int32
-    case srational  = 10  // Two Int32s (numerator/denominator)
-    case float      = 11  // IEEE 754 float
-    case double     = 12  // IEEE 754 double
+    case byte = 1 // UInt8
+    case ascii = 2 // 7-bit ASCII, null-terminated
+    case short = 3 // UInt16
+    case long = 4 // UInt32
+    case rational = 5 // Two UInt32s (numerator/denominator)
+    case sbyte = 6 // Int8
+    case undefined = 7 // Arbitrary bytes
+    case sshort = 8 // Int16
+    case slong = 9 // Int32
+    case srational = 10 // Two Int32s (numerator/denominator)
+    case float = 11 // IEEE 754 float
+    case double = 12 // IEEE 754 double
 
     /// Size in bytes of a single element of this type
     public var unitSize: Int {
         switch self {
         case .byte, .sbyte, .ascii, .undefined: return 1
-        case .short, .sshort:                   return 2
-        case .long, .slong, .float:             return 4
-        case .rational, .srational, .double:    return 8
+        case .short, .sshort: return 2
+        case .long, .slong, .float: return 4
+        case .rational, .srational, .double: return 8
         }
     }
 }
@@ -173,28 +178,28 @@ public enum TagValue: Equatable, CustomStringConvertible, Sendable {
 
     public var description: String {
         switch self {
-        case .byte(let v):          return "\(v)"
-        case .bytes(let v):         return "\(v)"
-        case .ascii(let v):         return v
-        case .short(let v):         return "\(v)"
-        case .shorts(let v):        return "\(v)"
-        case .long(let v):          return "\(v)"
-        case .longs(let v):         return "\(v)"
-        case .rational(let v):      return v.description
-        case .rationals(let v):     return v.map(\.description).joined(separator: ", ")
-        case .srational(let v):     return v.description
-        case .srationals(let v):    return v.map(\.description).joined(separator: ", ")
-        case .signedByte(let v):    return "\(v)"
-        case .signedBytes(let v):   return "\(v)"
-        case .signedShort(let v):   return "\(v)"
-        case .signedShorts(let v):  return "\(v)"
-        case .signedLong(let v):    return "\(v)"
-        case .signedLongs(let v):   return "\(v)"
-        case .float(let v):         return "\(v)"
-        case .floats(let v):        return "\(v)"
-        case .double(let v):        return "\(v)"
-        case .doubles(let v):       return "\(v)"
-        case .undefined(let v):     return "\(v.count) bytes"
+        case let .byte(v): return "\(v)"
+        case let .bytes(v): return "\(v)"
+        case let .ascii(v): return v
+        case let .short(v): return "\(v)"
+        case let .shorts(v): return "\(v)"
+        case let .long(v): return "\(v)"
+        case let .longs(v): return "\(v)"
+        case let .rational(v): return v.description
+        case let .rationals(v): return v.map(\.description).joined(separator: ", ")
+        case let .srational(v): return v.description
+        case let .srationals(v): return v.map(\.description).joined(separator: ", ")
+        case let .signedByte(v): return "\(v)"
+        case let .signedBytes(v): return "\(v)"
+        case let .signedShort(v): return "\(v)"
+        case let .signedShorts(v): return "\(v)"
+        case let .signedLong(v): return "\(v)"
+        case let .signedLongs(v): return "\(v)"
+        case let .float(v): return "\(v)"
+        case let .floats(v): return "\(v)"
+        case let .double(v): return "\(v)"
+        case let .doubles(v): return "\(v)"
+        case let .undefined(v): return "\(v.count) bytes"
         }
     }
 
@@ -202,16 +207,18 @@ public enum TagValue: Equatable, CustomStringConvertible, Sendable {
 
     /// Get as string (works for .ascii, falls back to description)
     public var stringValue: String? {
-        if case .ascii(let s) = self { return s }
+        if case let .ascii(s) = self {
+            return s
+        }
         return nil
     }
 
     /// Get as UInt32 (works for .byte, .short, .long)
     public var uint32Value: UInt32? {
         switch self {
-        case .byte(let v):  return UInt32(v)
-        case .short(let v): return UInt32(v)
-        case .long(let v):  return v
+        case let .byte(v): return UInt32(v)
+        case let .short(v): return UInt32(v)
+        case let .long(v): return v
         default: return nil
         }
     }
@@ -219,12 +226,12 @@ public enum TagValue: Equatable, CustomStringConvertible, Sendable {
     /// Get as Int (works for all integer types)
     public var intValue: Int? {
         switch self {
-        case .byte(let v):        return Int(v)
-        case .short(let v):       return Int(v)
-        case .long(let v):        return Int(v)
-        case .signedByte(let v):  return Int(v)
-        case .signedShort(let v): return Int(v)
-        case .signedLong(let v):  return Int(v)
+        case let .byte(v): return Int(v)
+        case let .short(v): return Int(v)
+        case let .long(v): return Int(v)
+        case let .signedByte(v): return Int(v)
+        case let .signedShort(v): return Int(v)
+        case let .signedLong(v): return Int(v)
         default: return nil
         }
     }
@@ -232,16 +239,16 @@ public enum TagValue: Equatable, CustomStringConvertible, Sendable {
     /// Get as Double (works for rational types, integers, and floats)
     public var doubleValue: Double? {
         switch self {
-        case .byte(let v):        return Double(v)
-        case .short(let v):       return Double(v)
-        case .long(let v):        return Double(v)
-        case .rational(let v):    return v.doubleValue
-        case .srational(let v):   return v.doubleValue
-        case .signedByte(let v):  return Double(v)
-        case .signedShort(let v): return Double(v)
-        case .signedLong(let v):  return Double(v)
-        case .float(let v):       return Double(v)
-        case .double(let v):      return v
+        case let .byte(v): return Double(v)
+        case let .short(v): return Double(v)
+        case let .long(v): return Double(v)
+        case let .rational(v): return v.doubleValue
+        case let .srational(v): return v.doubleValue
+        case let .signedByte(v): return Double(v)
+        case let .signedShort(v): return Double(v)
+        case let .signedLong(v): return Double(v)
+        case let .float(v): return Double(v)
+        case let .double(v): return v
         default: return nil
         }
     }
@@ -249,8 +256,8 @@ public enum TagValue: Equatable, CustomStringConvertible, Sendable {
     /// Get raw bytes (works for .undefined, .bytes)
     public var rawData: Data? {
         switch self {
-        case .undefined(let d): return d
-        case .bytes(let b): return Data(b)
+        case let .undefined(d): return d
+        case let .bytes(b): return Data(b)
         default: return nil
         }
     }
@@ -258,18 +265,18 @@ public enum TagValue: Equatable, CustomStringConvertible, Sendable {
     /// The EXIF data type ID this value would serialize as
     public var dataType: EXIFDataType {
         switch self {
-        case .byte, .bytes:                   return .byte
-        case .ascii:                          return .ascii
-        case .short, .shorts:                 return .short
-        case .long, .longs:                   return .long
-        case .rational, .rationals:           return .rational
-        case .srational, .srationals:         return .srational
-        case .signedByte, .signedBytes:       return .sbyte
-        case .signedShort, .signedShorts:     return .sshort
-        case .signedLong, .signedLongs:       return .slong
-        case .float, .floats:                 return .float
-        case .double, .doubles:               return .double
-        case .undefined:                      return .undefined
+        case .byte, .bytes: return .byte
+        case .ascii: return .ascii
+        case .short, .shorts: return .short
+        case .long, .longs: return .long
+        case .rational, .rationals: return .rational
+        case .srational, .srationals: return .srational
+        case .signedByte, .signedBytes: return .sbyte
+        case .signedShort, .signedShorts: return .sshort
+        case .signedLong, .signedLongs: return .slong
+        case .float, .floats: return .float
+        case .double, .doubles: return .double
+        case .undefined: return .undefined
         }
     }
 
@@ -280,18 +287,18 @@ public enum TagValue: Equatable, CustomStringConvertible, Sendable {
              .long, .signedLong, .rational, .srational,
              .float, .double:
             return 1
-        case .bytes(let v):         return UInt32(v.count)
-        case .ascii(let v):         return UInt32(v.utf8.count + 1) // +1 for null terminator
-        case .shorts(let v):        return UInt32(v.count)
-        case .signedBytes(let v):   return UInt32(v.count)
-        case .signedShorts(let v):  return UInt32(v.count)
-        case .longs(let v):         return UInt32(v.count)
-        case .signedLongs(let v):   return UInt32(v.count)
-        case .rationals(let v):     return UInt32(v.count)
-        case .srationals(let v):    return UInt32(v.count)
-        case .floats(let v):        return UInt32(v.count)
-        case .doubles(let v):       return UInt32(v.count)
-        case .undefined(let v):     return UInt32(v.count)
+        case let .bytes(v): return UInt32(v.count)
+        case let .ascii(v): return UInt32(v.utf8.count + 1) // +1 for null terminator
+        case let .shorts(v): return UInt32(v.count)
+        case let .signedBytes(v): return UInt32(v.count)
+        case let .signedShorts(v): return UInt32(v.count)
+        case let .longs(v): return UInt32(v.count)
+        case let .signedLongs(v): return UInt32(v.count)
+        case let .rationals(v): return UInt32(v.count)
+        case let .srationals(v): return UInt32(v.count)
+        case let .floats(v): return UInt32(v.count)
+        case let .doubles(v): return UInt32(v.count)
+        case let .undefined(v): return UInt32(v.count)
         }
     }
 
