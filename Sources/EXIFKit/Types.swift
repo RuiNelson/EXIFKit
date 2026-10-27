@@ -12,6 +12,7 @@ public enum EXIFError: Error, LocalizedError, CustomStringConvertible {
     case typeMismatch(expected: String, got: String)
     case invalidJPEG(String)
     case invalidPNG(String)
+    case invalidWebP(String)
     case invalidHEIF(String)
     case invalidCR3(String)
     case invalidJXL(String)
@@ -41,6 +42,8 @@ public enum EXIFError: Error, LocalizedError, CustomStringConvertible {
             return "Invalid JPEG: \(detail)"
         case let .invalidPNG(detail):
             return "Invalid PNG: \(detail)"
+        case let .invalidWebP(detail):
+            return "Invalid WebP: \(detail)"
         case let .invalidHEIF(detail):
             return "Invalid HEIF/HEIC: \(detail)"
         case let .invalidCR3(detail):

@@ -250,6 +250,7 @@ enum HandleParser {
         switch format {
         case .jpeg: return try await tiff(jpeg(file).tiff)
         case .png: return try await tiff(png(file).tiff)
+        case .webp: return try await tiff(webpTIFF(file))
         case .raf: return try await read(raf(file), format: .jpeg)
         case .cr3: return try await cr3(file)
         case .heif: return try await tiff(heif(file).tiff)

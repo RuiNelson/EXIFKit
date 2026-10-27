@@ -6,6 +6,7 @@ import Foundation
 public enum ImageFormat: String, CaseIterable, Sendable {
     case jpeg
     case png
+    case webp
     case tiff
     case dng
     case cr2 // Canon (TIFF-based)
@@ -48,6 +49,9 @@ public enum ImageFormat: String, CaseIterable, Sendable {
         if head.count >= 8, data.prefix(8) == Data([137, 80, 78, 71, 13, 10, 26, 10]) {
             return .png
         }
+        if WebPContainer.isWebP(data) {
+            return .webp
+        }
         if JXLContainer.isJXL(data) {
             return .jxl
         }
@@ -85,6 +89,7 @@ public enum ImageFormat: String, CaseIterable, Sendable {
         switch ext.lowercased() {
         case "jpg", "jpeg": return .jpeg
         case "png": return .png
+        case "webp": return .webp
         case "tif", "tiff": return .tiff
         case "dng": return .dng
         case "cr2": return .cr2
@@ -109,7 +114,7 @@ public enum ImageFormat: String, CaseIterable, Sendable {
 /// Main entry point for reading and writing EXIF metadata.
 ///
 /// Supports all major image formats:
-/// - **Standard**: JPEG, PNG, TIFF, DNG
+/// - **Standard**: JPEG, PNG, WebP, TIFF, DNG
 /// - **Canon**: CR2 (TIFF-based), CR3 (ISOBMFF-based)
 /// - **Nikon**: NEF (TIFF-based)
 /// - **Sony**: ARW (TIFF-based)

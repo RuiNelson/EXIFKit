@@ -2,7 +2,7 @@
 
 A Swift library for reading, writing and removing EXIF metadata through random-access file handles. Read metadata from memory, local files, HTTP servers or your own storage backend without loading the image into memory. The library has no external runtime dependencies.
 
-Supports JPEG, PNG, TIFF, DNG, CR2, CR3, NEF, ARW, RAF, ORF, RW2, PEF and HEIF/HEIC/AVIF and JPEG XL. Requires Swift 6.3+, macOS 11+, iOS/tvOS/Mac Catalyst 14+, watchOS 7+ or visionOS 1+.
+Supports JPEG, PNG, WebP, TIFF, DNG, CR2, CR3, NEF, ARW, RAF, ORF, RW2, PEF and HEIF/HEIC/AVIF and JPEG XL. Requires Swift 6.3+, macOS 11+, iOS/tvOS/Mac Catalyst 14+, watchOS 7+ or visionOS 1+.
 
 ## Installation
 
@@ -126,6 +126,7 @@ If the server answers `PATCH` with 405, 415 or 501, the handle falls back to a s
 
 - **JPEG:** the EXIF must fit in a single APP1 segment (about 64 KB).
 - **PNG:** the EXIF is stored in an `eXIf` chunk.
+- **WebP:** the EXIF is stored in an `EXIF` chunk after the image data. Writing EXIF to a simple lossy or lossless file first adds a `VP8X` header, using the canvas size from the image bitstream. `strip` removes the chunk and clears the `VP8X` EXIF flag.
 - **TIFF and TIFF-based RAW:** image data stays at its original offsets. Unchanged values stored outside the directories, including MakerNotes, are reused rather than rewritten. The byte order can't be changed, and the file must stay within 32-bit offsets (4 GiB). `strip` removes the EXIF, GPS and interoperability directories and zeros their bytes. It keeps IFD0, thumbnails and image layout tags so the image stays readable.
 - **HEIF, HEIC and AVIF:** only an Exif item that the file already declares can be edited. It is found through its `iloc` entry, including fragmented items and items stored in `idat`. A larger replacement is appended in a new `mdat` box, the index is updated, and the old item is cleared. EXIF that isn't in the index isn't searched for, and a file with no Exif item can't be given one.
 - **JPEG XL:** the EXIF lives in the container's top-level `Exif` box. It can be replaced at any size, because boxes hold no absolute offsets, and it is inserted after `ftyp` if missing. Brotli-compressed (`brob`) Exif boxes can't be read, but they are replaced or removed on write. Bare codestreams have no container to hold metadata and are rejected. `strip` removes the box.

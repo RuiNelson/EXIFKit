@@ -161,6 +161,8 @@ enum EditPlanner {
             return try await jpeg(file, tiff: structure, stripping: stripping)
         case .png:
             return try await png(file, structure: structure)
+        case .webp:
+            return try await webp(file, structure: structure)
         case .raf:
             return try await raf(file, structure: structure, stripping: stripping)
         case .heif:
